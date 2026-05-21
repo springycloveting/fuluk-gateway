@@ -2,11 +2,13 @@ const state = {
   sessions: [],
   selected: null,
   outputLoading: false,
+  outputLoadingSessionId: null,
   outputEtags: new Map(),
   outputPollTimer: null,
   outputPollDelayMs: 1000,
   cliDeploymentDefaults: {},
   pendingDeleteSession: null,
+  customQuickKeys: loadCustomQuickKeys(),
   language: localStorage.getItem("sessionGatewayLanguage") || "zh",
   theme: localStorage.getItem("sessionGatewayTheme") || "dark"
 };
@@ -26,6 +28,9 @@ const translations = {
     save: "保存",
     cancel: "取消",
     delete: "删除",
+    quickKeyTitle: "自定义快捷键",
+    quickKeyText: "文本 + 回车",
+    stopGeneration: "停止",
     send: "发送",
     run: "执行",
     language: "语言",
@@ -67,6 +72,9 @@ const translations = {
     save: "Save",
     cancel: "Cancel",
     delete: "Delete",
+    quickKeyTitle: "Custom Quick Key",
+    quickKeyText: "Text + Enter",
+    stopGeneration: "Stop",
     send: "Send",
     run: "Run",
     language: "Language",
@@ -117,6 +125,12 @@ const els = {
   deleteDialog: document.querySelector("#delete-dialog"),
   deleteForm: document.querySelector("#delete-form"),
   deleteMessage: document.querySelector("#delete-message"),
+  quickKeys: document.querySelector("#quick-keys"),
+  addQuickKey: document.querySelector("#add-quick-key"),
+  quickKeyDialog: document.querySelector("#quick-key-dialog"),
+  quickKeyForm: document.querySelector("#quick-key-form"),
+  quickKeyLabel: document.querySelector("#quick-key-label"),
+  quickKeyValue: document.querySelector("#quick-key-value"),
   token: document.querySelector("#token"),
   aiParserEnabled: document.querySelector("#ai-parser-enabled"),
   aiParserBaseUrl: document.querySelector("#ai-parser-base-url"),
@@ -214,6 +228,11 @@ els.deleteForm.addEventListener("submit", (event) => {
   event.preventDefault();
   deletePendingSession();
 });
+els.addQuickKey.addEventListener("click", openQuickKeyDialog);
+els.quickKeyForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  saveQuickKey();
+});
 els.input.addEventListener("keydown", (event) => {
   if (event.key === "Enter") sendInput();
 });
@@ -233,6 +252,7 @@ applyTheme();
 await loadConfig();
 updateCreateDeploymentControls();
 await refreshSessions();
+renderQuickKeys();
 resetOutputPolling(1000);
 
 async function api(path, options = {}) {
@@ -299,6 +319,7 @@ async function refreshSessions() {
       const current = state.sessions.find((session) => session.id === state.selected.id);
       state.selected = current || null;
       renderSessions();
+      renderQuickKeys();
       if (state.selected?.status === "running") {
         await loadOutput();
         resetOutputPolling();
@@ -313,6 +334,7 @@ async function refreshSessions() {
     }
     state.selected = state.sessions.find((session) => session.status === "running") ?? state.sessions[0] ?? null;
     renderSessions();
+    renderQuickKeys();
     if (state.selected?.status === "running") {
       await loadOutput();
       resetOutputPolling();
@@ -381,9 +403,10 @@ async function loadOutput(options = {}) {
     showSessionSummary(state.selected);
     return null;
   }
-  if (state.outputLoading) return;
   const sessionId = state.selected.id;
+  if (state.outputLoading && state.outputLoadingSessionId === sessionId) return null;
   state.outputLoading = true;
+  state.outputLoadingSessionId = sessionId;
   try {
     const params = new URLSearchParams({ lines: "300", format: "json" });
     const etag = state.outputEtags.get(sessionId);
@@ -403,7 +426,10 @@ async function loadOutput(options = {}) {
     showError(error);
     return null;
   } finally {
-    state.outputLoading = false;
+    if (state.outputLoadingSessionId === sessionId) {
+      state.outputLoading = false;
+      state.outputLoadingSessionId = null;
+    }
   }
 }
 
@@ -434,6 +460,40 @@ async function sendInput() {
     });
     els.input.value = "";
     if (state.selected) clearOutputEtag(state.selected.id);
+    resetOutputPolling(500);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function sendQuickText(text) {
+  if (!state.selected || state.selected.status !== "running") {
+    showError(new Error(t("selectRunning")));
+    return;
+  }
+  try {
+    await api(`/api/sessions/${encodeURIComponent(state.selected.id)}/input`, {
+      method: "POST",
+      body: JSON.stringify({ text })
+    });
+    clearOutputEtag(state.selected.id);
+    resetOutputPolling(500);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function sendQuickKeys(keys) {
+  if (!state.selected || state.selected.status !== "running") {
+    showError(new Error(t("selectRunning")));
+    return;
+  }
+  try {
+    await api(`/api/sessions/${encodeURIComponent(state.selected.id)}/keys`, {
+      method: "POST",
+      body: JSON.stringify({ keys })
+    });
+    clearOutputEtag(state.selected.id);
     resetOutputPolling(500);
   } catch (error) {
     showError(error);
@@ -487,12 +547,88 @@ async function deletePendingSession() {
       clearOutputPoll();
       els.output.textContent = "";
       els.title.textContent = t("noSession");
+      renderQuickKeys();
     }
     state.pendingDeleteSession = null;
     els.deleteDialog.close();
     await refreshSessions();
   } catch (error) {
     showError(error);
+  }
+}
+
+function renderQuickKeys() {
+  els.quickKeys.innerHTML = "";
+  for (const quickKey of quickKeysForSession(state.selected)) {
+    const button = document.createElement("button");
+    button.className = "quick-key";
+    button.type = "button";
+    button.textContent = quickKey.label;
+    button.title = quickKey.title ?? quickKey.label;
+    button.addEventListener("click", () => activateQuickKey(quickKey));
+    els.quickKeys.append(button);
+  }
+}
+
+function quickKeysForSession(session) {
+  const base = ["1", "2", "3", "4"].map((value) => ({
+    label: value,
+    type: "text",
+    value,
+    title: `${value} + Enter`
+  }));
+  const kindKeys = session && session.kind !== "runtime" ? quickKeysForKind(session.kind) : [];
+  return [...base, ...kindKeys, ...state.customQuickKeys];
+}
+
+function quickKeysForKind(kind) {
+  if (kind === "codex" || kind === "claude" || kind === "opencode") {
+    return [
+      { label: t("stopGeneration"), type: "key", value: "Escape", title: "Escape" },
+      { label: "Shift+Tab", type: "key", value: "BTab" }
+    ];
+  }
+  return [];
+}
+
+function activateQuickKey(quickKey) {
+  if (quickKey.type === "key") {
+    sendQuickKeys([quickKey.value]);
+    return;
+  }
+  sendQuickText(quickKey.value);
+}
+
+function openQuickKeyDialog() {
+  els.quickKeyLabel.value = "";
+  els.quickKeyValue.value = "";
+  els.quickKeyDialog.showModal();
+  els.quickKeyLabel.focus();
+}
+
+function saveQuickKey() {
+  const label = els.quickKeyLabel.value.trim();
+  const value = els.quickKeyValue.value.trim();
+  if (!label || !value) return;
+  state.customQuickKeys.push({ label, type: "text", value });
+  localStorage.setItem("sessionGatewayCustomQuickKeys", JSON.stringify(state.customQuickKeys));
+  els.quickKeyDialog.close();
+  renderQuickKeys();
+}
+
+function loadCustomQuickKeys() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem("sessionGatewayCustomQuickKeys") || "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item) => item && item.type !== "key" && typeof item.label === "string" && typeof item.value === "string")
+      .map((item) => ({
+        label: item.label.slice(0, 16),
+        type: "text",
+        value: item.value
+      }));
+  } catch {
+    return [];
   }
 }
 
@@ -517,9 +653,11 @@ function renderSessions() {
     item.addEventListener("click", async () => {
       state.selected = session;
       renderSessions();
+      renderQuickKeys();
       closeSessionsPanel();
       if (session.status === "running") {
-        await loadOutput();
+        clearOutputEtag(session.id);
+        await loadOutput({ force: true });
         resetOutputPolling(1000);
       } else {
         clearOutputPoll();

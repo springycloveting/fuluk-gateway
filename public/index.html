@@ -24,6 +24,10 @@
 
       <section class="terminal">
         <pre id="output"></pre>
+        <div class="quick-key-row">
+          <div id="quick-keys" class="quick-keys" aria-label="快捷键"></div>
+          <button id="add-quick-key" class="quick-key-add" type="button" title="添加快捷键">+</button>
+        </div>
         <div class="input-row">
           <input id="input" placeholder="发送到当前会话" />
           <button id="send" type="button">发送</button>
@@ -128,6 +132,21 @@
           <div class="dialog-actions">
             <button class="ghost" data-close-dialog="delete-dialog" type="button" data-i18n="cancel">取消</button>
             <button id="confirm-delete" class="danger" type="submit" data-i18n="delete">删除</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="quick-key-dialog">
+        <form id="quick-key-form" class="dialog-form">
+          <div class="dialog-head">
+            <h2 data-i18n="quickKeyTitle">自定义快捷键</h2>
+            <button class="ghost" data-close-dialog="quick-key-dialog" type="button" data-i18n="close">关闭</button>
+          </div>
+          <input id="quick-key-label" maxlength="16" placeholder="显示名称，例如 Y" />
+          <input id="quick-key-value" placeholder="例如 1 或 yes" />
+          <div class="dialog-actions">
+            <button class="ghost" data-close-dialog="quick-key-dialog" type="button" data-i18n="cancel">取消</button>
+            <button id="save-quick-key" type="submit" data-i18n="save">保存</button>
           </div>
         </form>
       </dialog>

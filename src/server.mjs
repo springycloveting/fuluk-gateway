@@ -130,6 +130,15 @@ async function handleSessionAction(req, res, url, method, idOrName, action) {
     return;
   }
 
+  if (method === "POST" && action === "keys") {
+    const body = await readJsonBody(req);
+    const keys = parseTmuxKeys(body.keys);
+    await tmux.sendKeys(session, keys);
+    store.touch(session.id);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
   if (method === "POST" && action === "restart") {
     await tmux.restart(session);
     store.markRunning(session.id);
@@ -152,6 +161,24 @@ async function handleSessionAction(req, res, url, method, idOrName, action) {
   }
 
   sendJson(res, 404, { error: "Not found" });
+}
+
+function parseTmuxKeys(value) {
+  if (!Array.isArray(value) || !value.length) throw new Error("keys are required");
+  return value.map((key) => {
+    if (typeof key !== "string" || !key.trim()) throw new Error("keys must be non-empty strings");
+    const normalized = key.trim();
+    if (!isAllowedTmuxKey(normalized)) throw new Error(`tmux key is not allowed: ${normalized}`);
+    return normalized;
+  });
+}
+
+function isAllowedTmuxKey(key) {
+  return (
+    /^[A-Za-z0-9]$/.test(key) ||
+    /^C-[A-Za-z]$/.test(key) ||
+    /^(Enter|Escape|Space|Tab|BTab|Up|Down|Left|Right|BSpace|DC|Home|End|PageUp|PageDown)$/.test(key)
+  );
 }
 
 async function handleNaturalLanguage(req, res) {

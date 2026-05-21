@@ -133,7 +133,7 @@ h2 {
   border: 1px solid var(--border);
   border-radius: 8px;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) auto auto;
   min-height: 0;
   overflow: hidden;
 }
@@ -148,6 +148,46 @@ h2 {
   overflow: auto;
   padding: 12px;
   white-space: pre-wrap;
+}
+
+.quick-key-row {
+  align-items: center;
+  background: var(--page);
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 42px;
+  padding: 6px 8px;
+}
+
+.quick-keys {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  white-space: nowrap;
+}
+
+.quick-key,
+.quick-key-add {
+  background: var(--panel-2);
+  border-color: var(--border-strong);
+  color: var(--text);
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 0 10px;
+}
+
+.quick-key-add {
+  border-color: var(--primary);
+  color: var(--primary);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+  min-width: 34px;
+  padding: 0;
 }
 
 .input-row {

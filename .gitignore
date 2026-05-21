@@ -3,8 +3,10 @@ dist/
 data/
 .env
 *.log
+.npmrc
 .claude/
 CLAUDE.md
 HANDOFF.md
+session-gateway-handoff.md
 TODO.md
 AI_CLI_Session_Manager_v1_Plan.md

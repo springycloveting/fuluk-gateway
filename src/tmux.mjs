@@ -87,6 +87,11 @@ export class TmuxBackend {
     await run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), this.config.submitKeys[record.kind]]);
   }
 
+  async sendKeys(record, keys) {
+    await this.ensureSessionExists(record);
+    await run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), ...keys]);
+  }
+
   async capture(record, lines) {
     await this.ensureSessionExists(record);
     const { stdout } = await run("tmux", [
