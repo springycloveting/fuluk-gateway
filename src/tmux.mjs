@@ -1,0 +1,199 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+const DEFAULT_TIMEOUT_MS = 10_000;
+
+export class TmuxBackend {
+  constructor(config) {
+    this.config = {
+      ...config,
+      submitKeyDelayMs: config.submitKeyDelayMs ?? 80,
+      submitKeys: {
+        codex: "Enter",
+        claude: "Enter",
+        opencode: "Enter",
+        runtime: "Enter",
+        ...(config.submitKeys ?? {})
+      }
+    };
+  }
+
+  async ensureAvailable() {
+    try {
+      await run("tmux", ["-V"], 3_000);
+    } catch {
+      throw new Error("tmux is required but was not found in PATH");
+    }
+  }
+
+  resolveCreateCommand(input) {
+    if (input.kind === "runtime") {
+      return { command: this.config.defaultRuntimeCommand, args: [], cwdMode: "host" };
+    }
+
+    const deployment = this.config.runtimeSettingsEnabled
+      ? this.config.runtimeSettings?.cliDeployment?.[input.kind]
+      : null;
+    if (deployment?.mode === "host") {
+      return { command: input.kind === "claude" ? "claude" : input.kind, args: [], cwdMode: "host" };
+    }
+
+    const configured = deployment?.dockerName
+      ? ["docker", "exec", "-it", deployment.dockerName, input.kind === "claude" ? "claude" : input.kind]
+      : this.config.cliCommands[input.kind];
+    return {
+      command: configured[0],
+      args: withDockerWorkdir(configured.slice(1), input.cwd),
+      cwdMode: "container"
+    };
+  }
+
+  async validateCreateInput(input, commandSpec) {
+    await assertCommandExists(commandSpec.command);
+    if (commandSpec.cwdMode === "host") {
+      await assertDirectoryExists(input.cwd);
+    }
+    if (commandSpec.cwdMode === "container") {
+      await assertDockerDirectoryExists(commandSpec.command, commandSpec.args, input.cwd);
+    }
+  }
+
+  async create(record) {
+    const shellCommand = [record.command, ...record.commandArgs].map(shellQuote).join(" ");
+    const args = ["new-session", "-d", "-s", record.tmuxSessionName];
+    if (record.kind === "runtime" || record.command !== "docker") {
+      args.push("-c", record.cwd);
+    }
+    args.push(shellCommand);
+    await run("tmux", args);
+  }
+
+  async exists(record) {
+    try {
+      await run("tmux", ["has-session", "-t", record.tmuxSessionName], 3_000);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async send(record, text) {
+    await this.ensureSessionExists(record);
+    await run("tmux", ["send-keys", "-t", record.tmuxSessionName, "-l", "--", text]);
+    await sleep(this.config.submitKeyDelayMs);
+    await run("tmux", ["send-keys", "-t", record.tmuxSessionName, this.config.submitKeys[record.kind]]);
+  }
+
+  async capture(record, lines) {
+    await this.ensureSessionExists(record);
+    const { stdout } = await run("tmux", ["capture-pane", "-pt", record.tmuxSessionName, "-S", `-${lines}`]);
+    return stdout;
+  }
+
+  async stop(record) {
+    if (await this.exists(record)) {
+      await run("tmux", ["kill-session", "-t", record.tmuxSessionName]);
+    }
+  }
+
+  async restart(record) {
+    await this.stop(record);
+    await this.create(record);
+  }
+
+  async ensureSessionExists(record) {
+    if (!(await this.exists(record))) {
+      throw new Error(`tmux session is not running: ${record.tmuxSessionName}`);
+    }
+  }
+}
+
+async function assertCommandExists(command) {
+  try {
+    await run("bash", ["-lc", `command -v ${shellQuote(command)}`], 3_000);
+  } catch {
+    throw new Error(`CLI command not found in PATH: ${command}`);
+  }
+}
+
+async function assertDirectoryExists(cwd) {
+  try {
+    await run("bash", ["-lc", `test -d ${shellQuote(cwd)}`], 3_000);
+  } catch {
+    throw new Error(`cwd does not exist or is not a directory: ${cwd}`);
+  }
+}
+
+async function assertDockerDirectoryExists(command, args, cwd) {
+  if (command !== "docker" || args[0] !== "exec") return;
+  const container = findDockerExecContainer(args);
+  if (!container) {
+    throw new Error(`Could not find docker exec container in command: ${command} ${args.join(" ")}`);
+  }
+
+  try {
+    await run("docker", ["exec", container, "test", "-d", cwd], 3_000);
+  } catch {
+    throw new Error(`container cwd does not exist or is not a directory: ${container}:${cwd}`);
+  }
+}
+
+function withDockerWorkdir(args, cwd) {
+  if (args[0] !== "exec") return args;
+  return ["exec", "-w", cwd, ...args.slice(1)];
+}
+
+function findDockerExecContainer(args) {
+  if (args[0] !== "exec") return null;
+  const optionsWithValue = new Set(["-w", "--workdir", "-u", "--user", "-e", "--env", "--env-file"]);
+
+  for (let index = 1; index < args.length; index += 1) {
+    const arg = args[index];
+    if (optionsWithValue.has(arg)) {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--workdir=") || arg.startsWith("--user=") || arg.startsWith("--env=")) {
+      continue;
+    }
+    if (arg.startsWith("-")) {
+      continue;
+    }
+    return arg;
+  }
+
+  return null;
+}
+
+function shellQuote(value) {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+async function run(command, args, timeout = DEFAULT_TIMEOUT_MS) {
+  const startedAt = Date.now();
+  const timeoutSeconds = Math.max(1, Math.ceil(timeout / 1000));
+  const wrappedCommand = "timeout";
+  const wrappedArgs = [`${timeoutSeconds}s`, command, ...args];
+  debugCommand("start", wrappedCommand, wrappedArgs);
+
+  try {
+    const result = await execFileAsync(wrappedCommand, wrappedArgs, { timeout: timeout + 1_000 });
+    debugCommand("ok", wrappedCommand, wrappedArgs, Date.now() - startedAt);
+    return result;
+  } catch (error) {
+    debugCommand("fail", wrappedCommand, wrappedArgs, Date.now() - startedAt);
+    const details = error.stderr?.trim() || error.stdout?.trim() || error.message;
+    throw new Error(`Command failed: ${wrappedCommand} ${wrappedArgs.join(" ")}${details ? `\n${details}` : ""}`);
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function debugCommand(status, command, args, durationMs) {
+  if (process.env.SESSION_GATEWAY_DEBUG !== "1") return;
+  const suffix = typeof durationMs === "number" ? ` ${durationMs}ms` : "";
+  console.error(`[tmux:${status}] ${command} ${args.join(" ")}${suffix}`);
+}

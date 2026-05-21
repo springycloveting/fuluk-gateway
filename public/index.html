@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI CLI Session Manager</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="identity">
+          <button id="open-sessions" class="ghost" type="button">会话</button>
+          <h1 id="selected-title">未选择会话</h1>
+        </div>
+        <div class="actions">
+          <button id="open-create" class="ghost" type="button">新建</button>
+          <button id="open-run" class="ghost" type="button">命令</button>
+          <button id="restart" class="ghost" type="button">重启</button>
+          <button id="stop" class="ghost" type="button">停止</button>
+          <button id="open-config" class="ghost" type="button">配置</button>
+        </div>
+      </header>
+
+      <section class="terminal">
+        <pre id="output"></pre>
+        <div class="input-row">
+          <input id="input" placeholder="发送到当前会话" />
+          <button id="send" type="button">发送</button>
+        </div>
+      </section>
+
+      <aside id="sessions-panel" class="sessions-panel" aria-hidden="true">
+        <div class="panel-head">
+          <h2 data-i18n="sessionsTitle">会话</h2>
+          <div class="actions">
+            <button id="refresh" class="ghost" type="button">刷新</button>
+            <button id="close-sessions" class="ghost" type="button">关闭</button>
+          </div>
+        </div>
+        <div id="session-list" class="session-list"></div>
+      </aside>
+
+      <dialog id="config-dialog">
+        <form id="config-form" class="dialog-form">
+          <div class="dialog-head">
+            <h2 data-i18n="configTitle">配置</h2>
+            <button class="ghost" data-close-dialog="config-dialog" type="button" data-i18n="close">关闭</button>
+          </div>
+          <label>
+            <span data-i18n="language">语言</span>
+            <select id="language">
+              <option value="zh">中文</option>
+              <option value="en">English</option>
+            </select>
+          </label>
+          <label>
+            <span data-i18n="theme">主题</span>
+            <select id="theme">
+              <option value="dark" data-i18n="darkTheme">黑暗</option>
+              <option value="light" data-i18n="lightTheme">明亮</option>
+            </select>
+          </label>
+          <label>
+            <span data-i18n="token">Bearer token</span>
+            <input id="token" type="password" autocomplete="off" placeholder="SESSION_GATEWAY_TOKEN" />
+          </label>
+          <fieldset>
+            <legend>Codex</legend>
+            <select id="codex-mode" data-deploy-mode="codex">
+              <option value="docker" data-i18n="dockerMode">Docker</option>
+              <option value="host" data-i18n="hostMode">非 Docker</option>
+            </select>
+            <input id="codex-docker" data-docker-name="codex" placeholder="worker-codex" />
+          </fieldset>
+          <fieldset>
+            <legend>OpenCode</legend>
+            <select id="opencode-mode" data-deploy-mode="opencode">
+              <option value="docker" data-i18n="dockerMode">Docker</option>
+              <option value="host" data-i18n="hostMode">非 Docker</option>
+            </select>
+            <input id="opencode-docker" data-docker-name="opencode" placeholder="worker-opencode" />
+          </fieldset>
+          <fieldset>
+            <legend>Claude Code</legend>
+            <select id="claude-mode" data-deploy-mode="claude">
+              <option value="docker" data-i18n="dockerMode">Docker</option>
+              <option value="host" data-i18n="hostMode">非 Docker</option>
+            </select>
+            <input id="claude-docker" data-docker-name="claude" placeholder="worker-claude" />
+          </fieldset>
+          <fieldset>
+            <legend data-i18n="commandParser">命令解析</legend>
+            <label class="inline-check">
+              <input id="ai-parser-enabled" type="checkbox" />
+              <span data-i18n="aiParserEnabled">规则失败时使用本地模型</span>
+            </label>
+            <input id="ai-parser-base-url" placeholder="http://127.0.0.1:1234" />
+            <input id="ai-parser-model" placeholder="local-model" />
+            <input id="ai-parser-api-key" type="password" autocomplete="off" placeholder="API key" />
+          </fieldset>
+          <button id="save-config" type="submit" data-i18n="save">保存</button>
+        </form>
+      </dialog>
+
+      <dialog id="create-dialog">
+        <form id="create-form" class="dialog-form">
+          <div class="dialog-head">
+            <h2 data-i18n="createTitle">新建会话</h2>
+            <button class="ghost" data-close-dialog="create-dialog" type="button" data-i18n="close">关闭</button>
+          </div>
+          <select id="kind">
+            <option value="codex">codex</option>
+            <option value="claude">claude</option>
+            <option value="opencode">opencode</option>
+            <option value="runtime">runtime</option>
+          </select>
+          <input id="name" placeholder="会话名，例如 codex-app" />
+          <input id="cwd" placeholder="/workspace/app" />
+          <input id="project" placeholder="项目名" />
+          <button id="create" type="submit">新建</button>
+        </form>
+      </dialog>
+
+      <dialog id="run-dialog">
+        <form id="run-form" class="dialog-form">
+          <div class="dialog-head">
+            <h2 data-i18n="commandTitle">命令</h2>
+            <button class="ghost" data-close-dialog="run-dialog" type="button" data-i18n="close">关闭</button>
+          </div>
+          <input id="nl" placeholder="新建一个 codex 会话 codex-app，目录 /workspace/app。" />
+          <button id="run-nl" type="submit">命令</button>
+          <pre id="command-result" class="command-result"></pre>
+        </form>
+      </dialog>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

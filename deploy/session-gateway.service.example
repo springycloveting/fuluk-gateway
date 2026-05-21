@@ -1,0 +1,21 @@
+[Unit]
+Description=Session Gateway
+Documentation=https://github.com/YOUR_ORG/YOUR_REPO
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/session-gateway
+EnvironmentFile=/etc/session-gateway/session-gateway.env
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=3
+
+# Run as the user that owns /opt/session-gateway and can access tmux.
+# If Docker worker mode is used, this user also needs docker group access.
+User=session-gateway
+Group=session-gateway
+
+[Install]
+WantedBy=multi-user.target

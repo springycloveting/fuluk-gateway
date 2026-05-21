@@ -1,0 +1,10 @@
+node_modules/
+dist/
+data/
+.env
+*.log
+.claude/
+CLAUDE.md
+HANDOFF.md
+TODO.md
+AI_CLI_Session_Manager_v1_Plan.md

@@ -1,0 +1,12 @@
+{
+  "name": "session-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node src/server.mjs",
+    "start": "node src/server.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "check": "node --check src/server.mjs && node --check src/store.mjs && node --check src/tmux.mjs && node --check src/nl.mjs && node --check src/ai_parser.mjs && node --check src/auth.mjs"
+  }
+}
