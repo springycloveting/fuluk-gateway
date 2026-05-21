@@ -2,9 +2,16 @@ const state = {
   sessions: [],
   selected: null,
   outputLoading: false,
+  outputEtags: new Map(),
+  outputPollTimer: null,
+  outputPollDelayMs: 1000,
+  cliDeploymentDefaults: {},
+  pendingDeleteSession: null,
   language: localStorage.getItem("sessionGatewayLanguage") || "zh",
   theme: localStorage.getItem("sessionGatewayTheme") || "dark"
 };
+
+const OUTPUT_POLL_DELAYS_MS = [1000, 2000, 5000, 10000];
 
 const translations = {
   zh: {
@@ -17,6 +24,8 @@ const translations = {
     refresh: "刷新",
     close: "关闭",
     save: "保存",
+    cancel: "取消",
+    delete: "删除",
     send: "发送",
     run: "执行",
     language: "语言",
@@ -27,14 +36,19 @@ const translations = {
     sessionsTitle: "会话",
     createTitle: "新建会话",
     commandTitle: "命令",
+    deleteTitle: "删除会话",
+    deleteConfirm: "确认删除会话“{name}”？正在运行的会话会先停止。",
     commandParser: "命令解析",
     aiParserEnabled: "规则失败时使用本地模型",
+    deployment: "部署方式",
     token: "Bearer token",
     dockerMode: "Docker",
     hostMode: "非 Docker",
     noSession: "未选择会话",
     selectRunning: "请先选择一个运行中的会话",
     selectSession: "请先选择一个会话",
+    statusRunning: "运行",
+    statusStopped: "停止",
     sendPlaceholder: "发送到当前会话",
     namePlaceholder: "会话名，例如 codex-app",
     cwdPlaceholder: "工作目录，例如 /workspace/app",
@@ -51,6 +65,8 @@ const translations = {
     refresh: "Refresh",
     close: "Close",
     save: "Save",
+    cancel: "Cancel",
+    delete: "Delete",
     send: "Send",
     run: "Run",
     language: "Language",
@@ -61,14 +77,19 @@ const translations = {
     sessionsTitle: "Sessions",
     createTitle: "Create Session",
     commandTitle: "Command",
+    deleteTitle: "Delete Session",
+    deleteConfirm: "Delete session \"{name}\"? A running session will be stopped first.",
     commandParser: "Command Parser",
     aiParserEnabled: "Use local model when rules fail",
+    deployment: "Deployment",
     token: "Bearer token",
     dockerMode: "Docker",
     hostMode: "Host",
     noSession: "No session selected",
     selectRunning: "Select a running session first",
     selectSession: "Select a session first",
+    statusRunning: "Running",
+    statusStopped: "Stopped",
     sendPlaceholder: "Send text to selected session",
     namePlaceholder: "Session name, e.g. codex-app",
     cwdPlaceholder: "Working directory, e.g. /workspace/app",
@@ -93,12 +114,18 @@ const els = {
   openRun: document.querySelector("#open-run"),
   runDialog: document.querySelector("#run-dialog"),
   runForm: document.querySelector("#run-form"),
+  deleteDialog: document.querySelector("#delete-dialog"),
+  deleteForm: document.querySelector("#delete-form"),
+  deleteMessage: document.querySelector("#delete-message"),
   token: document.querySelector("#token"),
   aiParserEnabled: document.querySelector("#ai-parser-enabled"),
   aiParserBaseUrl: document.querySelector("#ai-parser-base-url"),
   aiParserModel: document.querySelector("#ai-parser-model"),
   aiParserApiKey: document.querySelector("#ai-parser-api-key"),
   kind: document.querySelector("#kind"),
+  createDeployment: document.querySelector("#create-deployment"),
+  createDeploymentMode: document.querySelector("#create-deployment-mode"),
+  createDockerName: document.querySelector("#create-docker-name"),
   name: document.querySelector("#name"),
   cwd: document.querySelector("#cwd"),
   project: document.querySelector("#project"),
@@ -144,6 +171,7 @@ els.openConfig.addEventListener("click", async () => {
   els.configDialog.showModal();
 });
 els.openCreate.addEventListener("click", () => {
+  updateCreateDeploymentControls();
   els.createDialog.showModal();
   els.cwd.focus();
 });
@@ -167,6 +195,14 @@ els.createForm.addEventListener("submit", (event) => {
   event.preventDefault();
   createSession();
 });
+els.kind.addEventListener("change", () => {
+  delete els.createDeploymentMode.dataset.touched;
+  updateCreateDeploymentControls();
+});
+els.createDeploymentMode.addEventListener("change", () => {
+  els.createDeploymentMode.dataset.touched = "1";
+  updateCreateDeploymentControls();
+});
 els.send.addEventListener("click", sendInput);
 els.restart.addEventListener("click", restartSession);
 els.stop.addEventListener("click", stopSession);
@@ -174,19 +210,30 @@ els.runForm.addEventListener("submit", (event) => {
   event.preventDefault();
   runNaturalCommand();
 });
+els.deleteForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  deletePendingSession();
+});
 els.input.addEventListener("keydown", (event) => {
   if (event.key === "Enter") sendInput();
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeSessionsPanel();
 });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    clearOutputPoll();
+  } else {
+    resetOutputPolling(1000);
+  }
+});
 
 applyLanguage();
 applyTheme();
-attachDeploymentToggles();
 await loadConfig();
+updateCreateDeploymentControls();
 await refreshSessions();
-setInterval(refreshSelectedOutput, 2000);
+resetOutputPolling(1000);
 
 async function api(path, options = {}) {
   const headers = {
@@ -224,15 +271,7 @@ async function saveConfig() {
     applyTheme();
 
     const settings = {
-      cliDeployment: Object.fromEntries(
-        ["codex", "opencode", "claude"].map((kind) => [
-          kind,
-          {
-            mode: document.querySelector(`[data-deploy-mode="${kind}"]`).value,
-            dockerName: document.querySelector(`[data-docker-name="${kind}"]`).value
-          }
-        ])
-      ),
+      cliDeployment: state.cliDeploymentDefaults,
       commandParser: {
         enabled: els.aiParserEnabled.checked,
         mode: els.aiParserEnabled.checked ? "rules-first-ai-fallback" : "rules-only",
@@ -262,9 +301,12 @@ async function refreshSessions() {
       renderSessions();
       if (state.selected?.status === "running") {
         await loadOutput();
+        resetOutputPolling();
       } else if (state.selected) {
+        clearOutputPoll();
         showSessionSummary(state.selected);
       } else {
+        clearOutputPoll();
         els.title.textContent = t("noSession");
       }
       return;
@@ -273,6 +315,9 @@ async function refreshSessions() {
     renderSessions();
     if (state.selected?.status === "running") {
       await loadOutput();
+      resetOutputPolling();
+    } else {
+      clearOutputPoll();
     }
   } catch (error) {
     showError(error);
@@ -285,13 +330,19 @@ async function createSession() {
       kind: els.kind.value,
       name: els.name.value || undefined,
       cwd: els.cwd.value,
-      project: els.project.value || undefined
+      project: els.project.value || undefined,
+      deploymentMode: els.kind.value === "runtime" ? undefined : els.createDeploymentMode.value,
+      dockerName:
+        els.kind.value !== "runtime" && els.createDeploymentMode.value === "docker"
+          ? els.createDockerName.value
+          : undefined
     };
     const data = await api("/api/sessions", {
       method: "POST",
       body: JSON.stringify(body)
     });
     state.selected = data.session;
+    clearOutputEtag(state.selected.id);
     els.createDialog.close();
     await refreshSessions();
   } catch (error) {
@@ -314,25 +365,49 @@ async function runNaturalCommand() {
       els.commandResult.textContent = formatCommandResult(result);
       if (typeof result.output === "string") {
         els.output.textContent = result.output;
+        if (state.selected) clearOutputEtag(state.selected.id);
       }
       await refreshSessions();
-      scheduleOutputRefreshes();
+      resetOutputPolling(500);
     }
   } catch (error) {
     els.commandResult.textContent = error instanceof Error ? error.message : String(error);
   }
 }
 
-async function loadOutput() {
-  if (!state.selected) return;
+async function loadOutput(options = {}) {
+  if (!state.selected) return null;
   if (state.selected.status !== "running") {
     showSessionSummary(state.selected);
-    return;
+    return null;
   }
   if (state.outputLoading) return;
+  const sessionId = state.selected.id;
   state.outputLoading = true;
   try {
-    const text = await api(`/api/sessions/${encodeURIComponent(state.selected.id)}/output?lines=300`);
+    const params = new URLSearchParams({ lines: "300", format: "json" });
+    const etag = state.outputEtags.get(sessionId);
+    if (etag && !options.force) params.set("etag", etag);
+    const data = await api(`/api/sessions/${encodeURIComponent(sessionId)}/output?${params}`);
+    if (state.selected?.id !== sessionId) return null;
+    if (typeof data === "string") {
+      updateOutputText(data);
+      clearOutputEtag(sessionId);
+      return true;
+    }
+    if (data.etag) state.outputEtags.set(sessionId, data.etag);
+    if (!data.changed) return false;
+    updateOutputText(data.output ?? "");
+    return true;
+  } catch (error) {
+    showError(error);
+    return null;
+  } finally {
+    state.outputLoading = false;
+  }
+}
+
+function updateOutputText(text) {
     const shouldStickToBottom =
       els.output.scrollHeight - els.output.scrollTop - els.output.clientHeight < 48;
     els.output.textContent = text;
@@ -340,11 +415,6 @@ async function loadOutput() {
     if (shouldStickToBottom) {
       els.output.scrollTop = els.output.scrollHeight;
     }
-  } catch (error) {
-    showError(error);
-  } finally {
-    state.outputLoading = false;
-  }
 }
 
 async function sendInput() {
@@ -363,7 +433,8 @@ async function sendInput() {
       body: JSON.stringify({ text: els.input.value })
     });
     els.input.value = "";
-    scheduleOutputRefreshes();
+    if (state.selected) clearOutputEtag(state.selected.id);
+    resetOutputPolling(500);
   } catch (error) {
     showError(error);
   }
@@ -376,7 +447,9 @@ async function restartSession() {
   }
   try {
     await api(`/api/sessions/${encodeURIComponent(state.selected.id)}/restart`, { method: "POST" });
+    clearOutputEtag(state.selected.id);
     await refreshSessions();
+    resetOutputPolling(500);
   } catch (error) {
     showError(error);
   }
@@ -389,6 +462,34 @@ async function stopSession() {
   }
   try {
     await api(`/api/sessions/${encodeURIComponent(state.selected.id)}`, { method: "DELETE" });
+    clearOutputEtag(state.selected.id);
+    clearOutputPoll();
+    await refreshSessions();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+function openDeleteDialog(session) {
+  state.pendingDeleteSession = session;
+  els.deleteMessage.textContent = t("deleteConfirm").replace("{name}", session.name);
+  els.deleteDialog.showModal();
+}
+
+async function deletePendingSession() {
+  const session = state.pendingDeleteSession;
+  if (!session) return;
+  try {
+    await api(`/api/sessions/${encodeURIComponent(session.id)}/delete`, { method: "DELETE" });
+    clearOutputEtag(session.id);
+    if (state.selected?.id === session.id) {
+      state.selected = null;
+      clearOutputPoll();
+      els.output.textContent = "";
+      els.title.textContent = t("noSession");
+    }
+    state.pendingDeleteSession = null;
+    els.deleteDialog.close();
     await refreshSessions();
   } catch (error) {
     showError(error);
@@ -402,8 +503,16 @@ function renderSessions() {
     item.className = `session-item${state.selected?.id === session.id ? " active" : ""}`;
     item.type = "button";
     item.innerHTML = `
-      <span class="session-name">${escapeHtml(session.name)}</span>
-      <span class="session-meta">${escapeHtml(session.kind)} · ${escapeHtml(session.status)} · ${escapeHtml(session.cwd)}</span>
+      <span class="session-main">
+        <span class="session-name">${escapeHtml(session.name)}</span>
+        <span class="session-controls">
+          <span class="session-status ${session.status === "running" ? "running" : "stopped"}">${escapeHtml(
+            sessionStatusLabel(session)
+          )}</span>
+          <button class="session-delete" type="button" title="${escapeHtml(t("delete"))}">${escapeHtml(t("delete"))}</button>
+        </span>
+      </span>
+      <span class="session-meta">${escapeHtml(session.kind)} · ${escapeHtml(sessionDeploymentLabel(session))} · ${escapeHtml(session.cwd)}</span>
     `;
     item.addEventListener("click", async () => {
       state.selected = session;
@@ -411,9 +520,15 @@ function renderSessions() {
       closeSessionsPanel();
       if (session.status === "running") {
         await loadOutput();
+        resetOutputPolling(1000);
       } else {
+        clearOutputPoll();
         showSessionSummary(session);
       }
+    });
+    item.querySelector(".session-delete").addEventListener("click", (event) => {
+      event.stopPropagation();
+      openDeleteDialog(session);
     });
     els.list.append(item);
   }
@@ -442,33 +557,30 @@ function focusSessionInput() {
 }
 
 function applyServerSettings(settings) {
-  const cliDeployment = settings?.cliDeployment ?? {};
-  for (const kind of ["codex", "opencode", "claude"]) {
-    const mode = document.querySelector(`[data-deploy-mode="${kind}"]`);
-    const dockerName = document.querySelector(`[data-docker-name="${kind}"]`);
-    mode.value = cliDeployment[kind]?.mode ?? "docker";
-    dockerName.value = cliDeployment[kind]?.dockerName ?? `worker-${kind}`;
-  }
+  state.cliDeploymentDefaults = settings?.cliDeployment ?? {};
   const commandParser = settings?.commandParser ?? {};
   els.aiParserEnabled.checked = Boolean(commandParser.enabled);
   els.aiParserBaseUrl.value = commandParser.baseUrl ?? "";
   els.aiParserModel.value = commandParser.model ?? "";
   els.aiParserApiKey.value = commandParser.apiKey ?? "";
-  toggleDockerInputs();
+  updateCreateDeploymentControls();
 }
 
-function attachDeploymentToggles() {
-  document.querySelectorAll("[data-deploy-mode]").forEach((select) => {
-    select.addEventListener("change", toggleDockerInputs);
-  });
-}
+function updateCreateDeploymentControls() {
+  const kind = els.kind.value;
+  const isRuntime = kind === "runtime";
+  els.createDeployment.hidden = isRuntime;
+  if (isRuntime) return;
 
-function toggleDockerInputs() {
-  document.querySelectorAll("[data-deploy-mode]").forEach((select) => {
-    const kind = select.dataset.deployMode;
-    const dockerName = document.querySelector(`[data-docker-name="${kind}"]`);
-    dockerName.disabled = select.value !== "docker";
-  });
+  const defaults = state.cliDeploymentDefaults[kind] ?? {};
+  if (!els.createDeploymentMode.dataset.touched) {
+    els.createDeploymentMode.value = defaults.mode === "host" ? "host" : "docker";
+  }
+  if (!els.createDockerName.value || els.createDockerName.dataset.kind !== kind) {
+    els.createDockerName.value = defaults.dockerName ?? `worker-${kind}`;
+    els.createDockerName.dataset.kind = kind;
+  }
+  els.createDockerName.disabled = els.createDeploymentMode.value !== "docker";
 }
 
 function applyLanguage() {
@@ -488,6 +600,7 @@ function applyLanguage() {
   els.send.textContent = text.send;
   els.create.textContent = text.create;
   els.runNl.textContent = text.run;
+  document.querySelector("#confirm-delete").textContent = text.delete;
   els.input.placeholder = text.sendPlaceholder;
   els.name.placeholder = text.namePlaceholder;
   els.cwd.placeholder = text.cwdPlaceholder;
@@ -530,7 +643,8 @@ function formatSessionList(sessions) {
   return sessions
     .map((session) =>
       [
-        `${session.name}  [${session.kind} / ${session.status}]`,
+        `${session.name}  [${session.kind} / ${sessionStatusLabel(session)}]`,
+        `deployment: ${sessionDeploymentLabel(session)}`,
         `cwd: ${session.cwd}`,
         session.project ? `project: ${session.project}` : null,
         `updated: ${session.updatedAt}`
@@ -541,15 +655,54 @@ function formatSessionList(sessions) {
     .join("\n\n");
 }
 
-function refreshSelectedOutput() {
-  if (document.hidden || !state.selected || state.selected.status !== "running") return;
-  loadOutput();
+function sessionStatusLabel(session) {
+  return session.status === "running" ? t("statusRunning") : t("statusStopped");
 }
 
-function scheduleOutputRefreshes() {
-  for (const delay of [500, 1500, 3000, 6000, 10000]) {
-    setTimeout(refreshSelectedOutput, delay);
+function sessionDeploymentLabel(session) {
+  return session.command === "docker" ? t("dockerMode") : t("hostMode");
+}
+
+async function refreshSelectedOutput() {
+  if (document.hidden || !state.selected || state.selected.status !== "running") {
+    clearOutputPoll();
+    return;
   }
+  const changed = await loadOutput();
+  updateOutputPollDelay(changed);
+  scheduleOutputPoll(state.outputPollDelayMs);
+}
+
+function resetOutputPolling(delayMs = 1000) {
+  state.outputPollDelayMs = delayMs;
+  scheduleOutputPoll(delayMs);
+}
+
+function updateOutputPollDelay(changed) {
+  if (changed === true) {
+    state.outputPollDelayMs = OUTPUT_POLL_DELAYS_MS[0];
+    return;
+  }
+  const currentIndex = OUTPUT_POLL_DELAYS_MS.indexOf(state.outputPollDelayMs);
+  const nextIndex = Math.min(currentIndex < 0 ? 1 : currentIndex + 1, OUTPUT_POLL_DELAYS_MS.length - 1);
+  state.outputPollDelayMs = OUTPUT_POLL_DELAYS_MS[nextIndex];
+}
+
+function scheduleOutputPoll(delayMs) {
+  clearOutputPoll();
+  if (document.hidden || !state.selected || state.selected.status !== "running") return;
+  state.outputPollTimer = setTimeout(refreshSelectedOutput, delayMs);
+}
+
+function clearOutputPoll() {
+  if (state.outputPollTimer) {
+    clearTimeout(state.outputPollTimer);
+    state.outputPollTimer = null;
+  }
+}
+
+function clearOutputEtag(sessionId) {
+  state.outputEtags.delete(sessionId);
 }
 
 function showSessionSummary(session) {
@@ -559,6 +712,7 @@ function showSessionSummary(session) {
       name: session.name,
       kind: session.kind,
       status: session.status,
+      deployment: sessionDeploymentLabel(session),
       cwd: session.cwd,
       project: session.project,
       tmuxSessionName: session.tmuxSessionName,

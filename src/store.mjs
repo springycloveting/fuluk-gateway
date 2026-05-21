@@ -12,22 +12,7 @@ export class SessionStore {
 
   create(input, command, baseCommandArgs = []) {
     const id = newId();
-    const name = input.name?.trim() || `${input.kind}-${id.slice(0, 8)}`;
-    const timestamp = nowIso();
-    const record = {
-      id,
-      name,
-      kind: input.kind,
-      cwd: input.cwd,
-      project: input.project ?? null,
-      tmuxSessionName: sanitizeTmuxName(name),
-      command,
-      commandArgs: [...baseCommandArgs, ...(input.commandArgs ?? [])],
-      status: "running",
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      stoppedAt: null
-    };
+    const record = buildSessionRecord(id, input, command, baseCommandArgs);
 
     this.db
       .prepare(
@@ -49,6 +34,47 @@ export class SessionStore {
         record.createdAt,
         record.updatedAt,
         record.stoppedAt
+      );
+
+    return record;
+  }
+
+  replace(id, input, command, baseCommandArgs = []) {
+    const existing = this.findByIdOrName(id);
+    if (!existing) throw new Error(`Session not found: ${id}`);
+
+    const record = buildSessionRecord(id, { ...input, name: existing.name }, command, baseCommandArgs, {
+      createdAt: existing.createdAt
+    });
+
+    this.db
+      .prepare("delete from output_snapshots where session_id = ?")
+      .run(id);
+    this.db
+      .prepare(
+        `update sessions
+         set kind = ?,
+             cwd = ?,
+             project = ?,
+             tmux_session_name = ?,
+             command = ?,
+             command_args = ?,
+             status = ?,
+             updated_at = ?,
+             stopped_at = ?
+         where id = ?`
+      )
+      .run(
+        record.kind,
+        record.cwd,
+        record.project,
+        record.tmuxSessionName,
+        record.command,
+        JSON.stringify(record.commandArgs),
+        record.status,
+        record.updatedAt,
+        record.stoppedAt,
+        record.id
       );
 
     return record;
@@ -112,6 +138,12 @@ export class SessionStore {
     };
   }
 
+  delete(id) {
+    this.db.prepare("delete from output_snapshots where session_id = ?").run(id);
+    const result = this.db.prepare("delete from sessions where id = ?").run(id);
+    return result.changes > 0;
+  }
+
   close() {
     this.db.close();
   }
@@ -145,6 +177,25 @@ export class SessionStore {
         on output_snapshots(session_id, id desc);
     `);
   }
+}
+
+function buildSessionRecord(id, input, command, baseCommandArgs, options = {}) {
+  const name = input.name?.trim() || `${input.kind}-${id.slice(0, 8)}`;
+  const timestamp = nowIso();
+  return {
+    id,
+    name,
+    kind: input.kind,
+    cwd: input.cwd,
+    project: input.project ?? null,
+    tmuxSessionName: sanitizeTmuxName(name),
+    command,
+    commandArgs: [...baseCommandArgs, ...(input.commandArgs ?? [])],
+    status: "running",
+    createdAt: options.createdAt ?? timestamp,
+    updatedAt: timestamp,
+    stoppedAt: null
+  };
 }
 
 function mapSessionRow(row) {

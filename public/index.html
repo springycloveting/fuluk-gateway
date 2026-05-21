@@ -66,30 +66,6 @@
             <input id="token" type="password" autocomplete="off" placeholder="SESSION_GATEWAY_TOKEN" />
           </label>
           <fieldset>
-            <legend>Codex</legend>
-            <select id="codex-mode" data-deploy-mode="codex">
-              <option value="docker" data-i18n="dockerMode">Docker</option>
-              <option value="host" data-i18n="hostMode">非 Docker</option>
-            </select>
-            <input id="codex-docker" data-docker-name="codex" placeholder="worker-codex" />
-          </fieldset>
-          <fieldset>
-            <legend>OpenCode</legend>
-            <select id="opencode-mode" data-deploy-mode="opencode">
-              <option value="docker" data-i18n="dockerMode">Docker</option>
-              <option value="host" data-i18n="hostMode">非 Docker</option>
-            </select>
-            <input id="opencode-docker" data-docker-name="opencode" placeholder="worker-opencode" />
-          </fieldset>
-          <fieldset>
-            <legend>Claude Code</legend>
-            <select id="claude-mode" data-deploy-mode="claude">
-              <option value="docker" data-i18n="dockerMode">Docker</option>
-              <option value="host" data-i18n="hostMode">非 Docker</option>
-            </select>
-            <input id="claude-docker" data-docker-name="claude" placeholder="worker-claude" />
-          </fieldset>
-          <fieldset>
             <legend data-i18n="commandParser">命令解析</legend>
             <label class="inline-check">
               <input id="ai-parser-enabled" type="checkbox" />
@@ -115,6 +91,14 @@
             <option value="opencode">opencode</option>
             <option value="runtime">runtime</option>
           </select>
+          <fieldset id="create-deployment">
+            <legend data-i18n="deployment">部署方式</legend>
+            <select id="create-deployment-mode">
+              <option value="docker" data-i18n="dockerMode">Docker</option>
+              <option value="host" data-i18n="hostMode">非 Docker</option>
+            </select>
+            <input id="create-docker-name" placeholder="worker-codex" />
+          </fieldset>
           <input id="name" placeholder="会话名，例如 codex-app" />
           <input id="cwd" placeholder="/workspace/app" />
           <input id="project" placeholder="项目名" />
@@ -131,6 +115,20 @@
           <input id="nl" placeholder="新建一个 codex 会话 codex-app，目录 /workspace/app。" />
           <button id="run-nl" type="submit">命令</button>
           <pre id="command-result" class="command-result"></pre>
+        </form>
+      </dialog>
+
+      <dialog id="delete-dialog">
+        <form id="delete-form" class="dialog-form">
+          <div class="dialog-head">
+            <h2 data-i18n="deleteTitle">删除会话</h2>
+            <button class="ghost" data-close-dialog="delete-dialog" type="button" data-i18n="close">关闭</button>
+          </div>
+          <p id="delete-message" class="dialog-message"></p>
+          <div class="dialog-actions">
+            <button class="ghost" data-close-dialog="delete-dialog" type="button" data-i18n="cancel">取消</button>
+            <button id="confirm-delete" class="danger" type="submit" data-i18n="delete">删除</button>
+          </div>
         </form>
       </dialog>
     </main>

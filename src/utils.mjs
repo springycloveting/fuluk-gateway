@@ -24,6 +24,10 @@ export function normalizeLines(value, fallback = 120) {
   return Math.min(Math.max(parsed, 1), 2000);
 }
 
+export function outputEtag(text, lines) {
+  return crypto.createHash("sha256").update(`${lines}\0${text}`).digest("hex");
+}
+
 export function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let body = "";

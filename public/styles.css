@@ -14,6 +14,8 @@
   --label: #9aa8ba;
   --placeholder: #718196;
   --primary: #2f81f7;
+  --success: #2ea043;
+  --danger: #d73a49;
   --shadow: rgba(0, 0, 0, 0.36);
   background: var(--page);
   color: var(--text);
@@ -33,6 +35,8 @@
   --label: #5f6b7a;
   --placeholder: #8a96a6;
   --primary: #1f6feb;
+  --success: #1a7f37;
+  --danger: #cf222e;
   --shadow: rgba(15, 23, 32, 0.16);
 }
 
@@ -217,11 +221,53 @@ h2 {
   border-color: var(--primary);
 }
 
+.session-main {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+}
+
+.session-controls {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
 .session-name {
   font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.session-delete {
+  background: transparent;
+  border-color: var(--danger);
+  color: var(--danger);
+  font-size: 11px;
+  min-height: 22px;
+  padding: 0 8px;
+}
+
+.session-status {
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  min-width: 44px;
+  padding: 0 8px;
+  text-align: center;
+}
+
+.session-status.running {
+  color: var(--success);
+}
+
+.session-status.stopped {
+  color: var(--danger);
 }
 
 .session-meta {
@@ -254,6 +300,27 @@ dialog::backdrop {
 
 .dialog-form .dialog-head {
   margin: 0 -12px;
+}
+
+.dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.dialog-actions button {
+  width: auto;
+}
+
+.dialog-message {
+  color: var(--text);
+  line-height: 1.5;
+  margin: 0;
+}
+
+button.danger {
+  background: var(--danger);
+  border-color: var(--danger);
 }
 
 .command-result {

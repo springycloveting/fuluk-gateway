@@ -8,7 +8,7 @@ import { isAuthorizedHeader } from "./auth.mjs";
 import { parseNaturalCommand } from "./nl.mjs";
 import { SessionStore } from "./store.mjs";
 import { TmuxBackend } from "./tmux.mjs";
-import { normalizeLines, readJsonBody } from "./utils.mjs";
+import { normalizeLines, outputEtag, readJsonBody } from "./utils.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(__dirname, "..", "public");
@@ -109,6 +109,13 @@ async function handleSessionAction(req, res, url, method, idOrName, action) {
   if (method === "GET" && action === "output") {
     const lines = normalizeLines(url.searchParams.get("lines"));
     const text = await tmux.capture(session, lines);
+    const etag = outputEtag(text, lines);
+    if (url.searchParams.get("format") === "json") {
+      const changed = url.searchParams.get("etag") !== etag;
+      if (changed) store.saveOutput(session.id, lines, text);
+      sendJson(res, 200, changed ? { changed, etag, output: text } : { changed, etag });
+      return;
+    }
     store.saveOutput(session.id, lines, text);
     sendText(res, 200, text);
     return;
@@ -133,6 +140,13 @@ async function handleSessionAction(req, res, url, method, idOrName, action) {
   if (method === "DELETE" && action === "") {
     await tmux.stop(session);
     store.updateStatus(session.id, "stopped");
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (method === "DELETE" && action === "delete") {
+    await tmux.stop(session);
+    store.delete(session.id);
     sendJson(res, 200, { ok: true });
     return;
   }
@@ -240,14 +254,25 @@ function commandHelpText() {
 async function createSession(input) {
   const commandSpec = tmux.resolveCreateCommand(input);
   await tmux.ensureAvailable();
+  const existingSession = findExistingNamedSession(input);
+  if (existingSession) {
+    const isRunning = await tmux.exists(existingSession);
+    store.updateStatus(existingSession.id, isRunning ? "running" : "stopped");
+    if (isRunning) {
+      throw new Error(`Session name already exists and is running: ${existingSession.name}`);
+    }
+  }
   await tmux.validateCreateInput(input, commandSpec);
-  const session = store.create(input, commandSpec.command, commandSpec.args);
+
+  const session = existingSession
+    ? store.replace(existingSession.id, input, commandSpec.command, commandSpec.args)
+    : store.create(input, commandSpec.command, commandSpec.args);
 
   try {
     await tmux.create(session);
     return session;
   } catch (error) {
-    store.updateStatus(session.id, "missing");
+    store.updateStatus(session.id, "stopped");
     throw error;
   }
 }
@@ -255,21 +280,30 @@ async function createSession(input) {
 async function refreshStatuses(sessions) {
   for (const session of sessions) {
     const exists = await tmux.exists(session);
-    const nextStatus = exists ? "running" : session.status === "stopped" ? "stopped" : "missing";
+    const nextStatus = exists ? "running" : "stopped";
     if (nextStatus !== session.status) store.updateStatus(session.id, nextStatus);
   }
   return store.list();
 }
 
+function findExistingNamedSession(input) {
+  const name = input.name?.trim();
+  if (!name) return null;
+  const existing = store.findByIdOrName(name);
+  return existing?.name === name ? existing : null;
+}
+
 function parseCreateInput(body) {
   if (!isSessionKind(body.kind)) throw new Error("kind must be codex, claude, opencode, or runtime");
   if (typeof body.cwd !== "string" || !body.cwd.trim()) throw new Error("cwd is required");
+  const deployment = parseCreateDeployment(body.kind, body);
 
   return {
     kind: body.kind,
     cwd: body.cwd,
     name: typeof body.name === "string" ? body.name : undefined,
     project: typeof body.project === "string" ? body.project : null,
+    deployment,
     commandArgs: Array.isArray(body.commandArgs)
       ? body.commandArgs.map((item) => {
           if (typeof item !== "string") throw new Error("commandArgs must be strings");
@@ -277,6 +311,21 @@ function parseCreateInput(body) {
         })
       : []
   };
+}
+
+function parseCreateDeployment(kind, body) {
+  if (kind === "runtime") return null;
+  const mode = body.deploymentMode ?? body.deployment?.mode;
+  if (mode === undefined || mode === null || mode === "") return null;
+  if (mode !== "host" && mode !== "docker") throw new Error("deploymentMode must be docker or host");
+  const fallbackDockerName = config.runtimeSettings?.cliDeployment?.[kind]?.dockerName ?? `worker-${kind}`;
+  const dockerName =
+    typeof body.dockerName === "string" && body.dockerName.trim()
+      ? body.dockerName.trim()
+      : typeof body.deployment?.dockerName === "string" && body.deployment.dockerName.trim()
+        ? body.deployment.dockerName.trim()
+        : fallbackDockerName;
+  return { mode, dockerName };
 }
 
 function isSessionKind(value) {

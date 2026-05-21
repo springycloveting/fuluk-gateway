@@ -32,9 +32,11 @@ export class TmuxBackend {
       return { command: this.config.defaultRuntimeCommand, args: [], cwdMode: "host" };
     }
 
-    const deployment = this.config.runtimeSettingsEnabled
-      ? this.config.runtimeSettings?.cliDeployment?.[input.kind]
-      : null;
+    const deployment = input.deployment ?? (
+      this.config.runtimeSettingsEnabled
+        ? this.config.runtimeSettings?.cliDeployment?.[input.kind]
+        : null
+    );
     if (deployment?.mode === "host") {
       return { command: input.kind === "claude" ? "claude" : input.kind, args: [], cwdMode: "host" };
     }
@@ -52,10 +54,10 @@ export class TmuxBackend {
   async validateCreateInput(input, commandSpec) {
     await assertCommandExists(commandSpec.command);
     if (commandSpec.cwdMode === "host") {
-      await assertDirectoryExists(input.cwd);
+      await ensureDirectoryExists(input.cwd);
     }
     if (commandSpec.cwdMode === "container") {
-      await assertDockerDirectoryExists(commandSpec.command, commandSpec.args, input.cwd);
+      await ensureDockerDirectoryExists(commandSpec.command, commandSpec.args, input.cwd);
     }
   }
 
@@ -71,7 +73,7 @@ export class TmuxBackend {
 
   async exists(record) {
     try {
-      await run("tmux", ["has-session", "-t", record.tmuxSessionName], 3_000);
+      await run("tmux", ["has-session", "-t", exactTmuxSessionTarget(record.tmuxSessionName)], 3_000);
       return true;
     } catch {
       return false;
@@ -80,20 +82,26 @@ export class TmuxBackend {
 
   async send(record, text) {
     await this.ensureSessionExists(record);
-    await run("tmux", ["send-keys", "-t", record.tmuxSessionName, "-l", "--", text]);
+    await run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), "-l", "--", text]);
     await sleep(this.config.submitKeyDelayMs);
-    await run("tmux", ["send-keys", "-t", record.tmuxSessionName, this.config.submitKeys[record.kind]]);
+    await run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), this.config.submitKeys[record.kind]]);
   }
 
   async capture(record, lines) {
     await this.ensureSessionExists(record);
-    const { stdout } = await run("tmux", ["capture-pane", "-pt", record.tmuxSessionName, "-S", `-${lines}`]);
+    const { stdout } = await run("tmux", [
+      "capture-pane",
+      "-pt",
+      exactTmuxPaneTarget(record.tmuxSessionName),
+      "-S",
+      `-${lines}`
+    ]);
     return stdout;
   }
 
   async stop(record) {
     if (await this.exists(record)) {
-      await run("tmux", ["kill-session", "-t", record.tmuxSessionName]);
+      await run("tmux", ["kill-session", "-t", exactTmuxSessionTarget(record.tmuxSessionName)]);
     }
   }
 
@@ -117,15 +125,15 @@ async function assertCommandExists(command) {
   }
 }
 
-async function assertDirectoryExists(cwd) {
+async function ensureDirectoryExists(cwd) {
   try {
-    await run("bash", ["-lc", `test -d ${shellQuote(cwd)}`], 3_000);
+    await run("mkdir", ["-p", cwd], 3_000);
   } catch {
-    throw new Error(`cwd does not exist or is not a directory: ${cwd}`);
+    throw new Error(`cwd could not be created or is not a directory: ${cwd}`);
   }
 }
 
-async function assertDockerDirectoryExists(command, args, cwd) {
+async function ensureDockerDirectoryExists(command, args, cwd) {
   if (command !== "docker" || args[0] !== "exec") return;
   const container = findDockerExecContainer(args);
   if (!container) {
@@ -133,9 +141,9 @@ async function assertDockerDirectoryExists(command, args, cwd) {
   }
 
   try {
-    await run("docker", ["exec", container, "test", "-d", cwd], 3_000);
+    await run("docker", ["exec", container, "mkdir", "-p", cwd], 3_000);
   } catch {
-    throw new Error(`container cwd does not exist or is not a directory: ${container}:${cwd}`);
+    throw new Error(`container cwd could not be created or is not a directory: ${container}:${cwd}`);
   }
 }
 
@@ -164,6 +172,14 @@ function findDockerExecContainer(args) {
   }
 
   return null;
+}
+
+export function exactTmuxSessionTarget(name) {
+  return `=${name}`;
+}
+
+export function exactTmuxPaneTarget(name) {
+  return `=${name}:`;
 }
 
 function shellQuote(value) {

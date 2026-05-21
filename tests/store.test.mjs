@@ -67,3 +67,70 @@ test("SessionStore lists recently used sessions first", async () => {
   assert.equal(store.list()[0].id, older.id);
   store.close();
 });
+
+test("SessionStore replaces an existing stopped session", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-"));
+  const store = new SessionStore(path.join(dir, "test.sqlite"));
+
+  const original = store.create(
+    {
+      kind: "runtime",
+      cwd: dir,
+      name: "app",
+      project: "old"
+    },
+    "/bin/bash",
+    []
+  );
+  store.saveOutput(original.id, 10, "old output");
+  store.updateStatus(original.id, "stopped");
+
+  const replacement = store.replace(
+    original.id,
+    {
+      kind: "codex",
+      cwd: path.join(dir, "next"),
+      name: "ignored-name",
+      project: "new",
+      commandArgs: ["--resume"]
+    },
+    "codex",
+    []
+  );
+
+  assert.equal(replacement.id, original.id);
+  assert.equal(replacement.name, "app");
+  assert.equal(replacement.kind, "codex");
+  assert.equal(replacement.cwd, path.join(dir, "next"));
+  assert.equal(replacement.project, "new");
+  assert.deepEqual(replacement.commandArgs, ["--resume"]);
+  assert.equal(replacement.status, "running");
+
+  const saved = store.findByIdOrName("app");
+  assert.equal(saved.id, original.id);
+  assert.equal(saved.kind, "codex");
+  assert.equal(saved.status, "running");
+
+  const snapshots = store.db
+    .prepare("select * from output_snapshots where session_id = ?")
+    .all(original.id);
+  assert.equal(snapshots.length, 0);
+  store.close();
+});
+
+test("SessionStore deletes a session and its output snapshots", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-"));
+  const store = new SessionStore(path.join(dir, "test.sqlite"));
+
+  const session = store.create({ kind: "runtime", cwd: dir, name: "delete-me" }, "/bin/bash", []);
+  store.saveOutput(session.id, 10, "output");
+
+  assert.equal(store.delete(session.id), true);
+  assert.equal(store.findByIdOrName(session.id), null);
+  assert.equal(
+    store.db.prepare("select count(*) as count from output_snapshots where session_id = ?").get(session.id).count,
+    0
+  );
+  assert.equal(store.delete(session.id), false);
+  store.close();
+});
