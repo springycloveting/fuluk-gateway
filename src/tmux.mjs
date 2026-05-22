@@ -32,17 +32,17 @@ export class TmuxBackend {
       return { command: this.config.defaultRuntimeCommand, args: [], cwdMode: "host" };
     }
 
-    const deployment = input.deployment ?? (
-      this.config.runtimeSettingsEnabled
-        ? this.config.runtimeSettings?.cliDeployment?.[input.kind]
-        : null
-    );
+    const configuredDeployment = this.config.runtimeSettingsEnabled
+      ? this.config.runtimeSettings?.cliDeployment?.[input.kind]
+      : null;
+    const deployment = input.deployment ?? configuredDeployment;
     if (deployment?.mode === "host") {
       return { command: input.kind === "claude" ? "claude" : input.kind, args: [], cwdMode: "host" };
     }
 
-    const configured = deployment?.dockerName
-      ? ["docker", "exec", "-it", deployment.dockerName, input.kind === "claude" ? "claude" : input.kind]
+    const dockerName = deployment?.dockerName ?? configuredDeployment?.dockerName;
+    const configured = dockerName
+      ? ["docker", "exec", "-it", dockerName, input.kind === "claude" ? "claude" : input.kind]
       : this.config.cliCommands[input.kind];
     return {
       command: configured[0],
@@ -64,11 +64,12 @@ export class TmuxBackend {
   async create(record) {
     const shellCommand = [record.command, ...record.commandArgs].map(shellQuote).join(" ");
     const args = ["new-session", "-d", "-s", record.tmuxSessionName];
-    if (record.kind === "runtime" || record.command !== "docker") {
+    if (record.command !== "docker") {
       args.push("-c", record.cwd);
     }
-    args.push(shellCommand);
     await run("tmux", args);
+    await run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), "-l", "--", shellCommand]);
+    await run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), "Enter"]);
   }
 
   async exists(record) {

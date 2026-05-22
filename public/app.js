@@ -6,6 +6,7 @@ const state = {
   outputEtags: new Map(),
   outputPollTimer: null,
   outputPollDelayMs: 1000,
+  outputWheelLastSentAt: 0,
   cliDeploymentDefaults: {},
   pendingDeleteSession: null,
   customQuickKeys: loadCustomQuickKeys(),
@@ -31,6 +32,8 @@ const translations = {
     quickKeyTitle: "自定义快捷键",
     quickKeyText: "文本 + 回车",
     stopGeneration: "停止",
+    pageUp: "上页",
+    pageDown: "下页",
     send: "发送",
     run: "执行",
     language: "语言",
@@ -75,6 +78,8 @@ const translations = {
     quickKeyTitle: "Custom Quick Key",
     quickKeyText: "Text + Enter",
     stopGeneration: "Stop",
+    pageUp: "Page Up",
+    pageDown: "Page Down",
     send: "Send",
     run: "Run",
     language: "Language",
@@ -235,7 +240,12 @@ els.quickKeyForm.addEventListener("submit", (event) => {
 });
 els.input.addEventListener("keydown", (event) => {
   if (event.key === "Enter") sendInput();
+  if (event.key === "PageUp" || event.key === "PageDown") {
+    event.preventDefault();
+    sendQuickKeys([event.key]);
+  }
 });
+els.output.addEventListener("wheel", handleOutputWheel, { passive: false });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeSessionsPanel();
 });
@@ -443,6 +453,23 @@ function updateOutputText(text) {
     }
 }
 
+function handleOutputWheel(event) {
+  if (!shouldForwardOutputWheel(event)) return;
+  event.preventDefault();
+  const now = Date.now();
+  if (now - state.outputWheelLastSentAt < 120) return;
+  state.outputWheelLastSentAt = now;
+  sendQuickKeys([event.deltaY < 0 ? "PageUp" : "PageDown"]);
+}
+
+function shouldForwardOutputWheel(event) {
+  if (!state.selected || state.selected.status !== "running" || state.selected.kind === "runtime") return false;
+  if (!event.deltaY) return false;
+  const canScrollUp = els.output.scrollTop > 0;
+  const canScrollDown = els.output.scrollTop + els.output.clientHeight < els.output.scrollHeight - 1;
+  return event.deltaY < 0 ? !canScrollUp : !canScrollDown;
+}
+
 async function sendInput() {
   if (!state.selected) {
     showError(new Error(t("selectRunning")));
@@ -585,7 +612,9 @@ function quickKeysForKind(kind) {
   if (kind === "codex" || kind === "claude" || kind === "opencode") {
     return [
       { label: t("stopGeneration"), type: "key", value: "Escape", title: "Escape" },
-      { label: "Shift+Tab", type: "key", value: "BTab" }
+      { label: "Shift+Tab", type: "key", value: "BTab" },
+      { label: t("pageUp"), type: "key", value: "PageUp", title: "PageUp" },
+      { label: t("pageDown"), type: "key", value: "PageDown", title: "PageDown" }
     ];
   }
   return [];

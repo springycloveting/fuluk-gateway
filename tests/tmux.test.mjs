@@ -143,6 +143,18 @@ test("TmuxBackend uses per-session deployment input before global settings", () 
       cwdMode: "container"
     }
   );
+  assert.deepEqual(
+    tmux.resolveCreateCommand({
+      kind: "codex",
+      cwd: "/workspace/app",
+      deployment: { mode: "docker" }
+    }),
+    {
+      command: "docker",
+      args: ["exec", "-w", "/workspace/app", "-it", "global-codex", "codex"],
+      cwdMode: "container"
+    }
+  );
 });
 
 test("TmuxBackend creates missing host cwd before creating a session", async () => {

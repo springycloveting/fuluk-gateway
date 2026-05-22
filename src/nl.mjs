@@ -60,7 +60,8 @@ export function parseNaturalCommand(text) {
         kind,
         cwd,
         name,
-        project
+        project,
+        ...deploymentInput(raw)
       }
     };
   }
@@ -76,7 +77,8 @@ export function parseNaturalCommand(text) {
         kind,
         cwd,
         name: parseName(raw, kind, cwd),
-        project: raw.match(/(?:项目|project)\s*([A-Za-z0-9_.-]+)/i)?.[1] ?? null
+        project: raw.match(/(?:项目|project)\s*([A-Za-z0-9_.-]+)/i)?.[1] ?? null,
+        ...deploymentInput(raw)
       }
     };
   }
@@ -89,7 +91,8 @@ export function parseNaturalCommand(text) {
         kind: kindMap[enCreate[1].toLowerCase()],
         cwd: enCreate[3],
         name: enCreate[2] || undefined,
-        project: enCreate[4] ?? null
+        project: enCreate[4] ?? null,
+        ...deploymentInput(raw)
       }
     };
   }
@@ -115,6 +118,21 @@ function parseName(raw, kind, cwd) {
   const direct = raw.match(/(?:名字|名称|name)\s*(?:用|为|叫)?\s*([A-Za-z0-9_.+-]+)/i)?.[1];
   if (direct) return normalizeNameExpression(direct, kind, cwd);
   return undefined;
+}
+
+function parseDeployment(raw) {
+  if (/(?:host|非\s*docker|本机|宿主机)\s*(?:运行)?/iu.test(raw)) {
+    return { mode: "host" };
+  }
+  if (/(?:在|用)?\s*docker\s*(?:里|中|内)?\s*(?:运行)?/iu.test(raw)) {
+    return { mode: "docker" };
+  }
+  return undefined;
+}
+
+function deploymentInput(raw) {
+  const deployment = parseDeployment(raw);
+  return deployment ? { deployment } : {};
 }
 
 function normalizeNameExpression(value, kind, cwd) {

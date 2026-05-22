@@ -38,6 +38,29 @@ test("parses loose Chinese create commands with folder-derived names", () => {
   });
 });
 
+test("parses explicit create deployment mode", () => {
+  assert.deepEqual(parseNaturalCommand("新建一个claude会话，在docker里运行，用/work/OPCAid文件夹"), {
+    type: "create",
+    input: {
+      kind: "claude",
+      cwd: "/work/OPCAid",
+      name: undefined,
+      project: null,
+      deployment: { mode: "docker" }
+    }
+  });
+  assert.deepEqual(parseNaturalCommand("新建一个codex会话，在宿主机运行，用/workspace/app文件夹"), {
+    type: "create",
+    input: {
+      kind: "codex",
+      cwd: "/workspace/app",
+      name: undefined,
+      project: null,
+      deployment: { mode: "host" }
+    }
+  });
+});
+
 test("parses send commands", () => {
   assert.deepEqual(parseNaturalCommand("把这句话发给 claude-main：查看。"), {
     type: "send",
