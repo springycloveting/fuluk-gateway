@@ -111,6 +111,25 @@ input::placeholder {
   min-width: 0;
 }
 
+.topbar-check {
+  align-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text);
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 12px;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.topbar-check input {
+  min-height: 0;
+  width: auto;
+}
+
 h1,
 h2 {
   margin: 0;

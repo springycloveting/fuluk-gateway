@@ -384,7 +384,7 @@ async function serveStatic(res, pathname) {
       ".css": "text/css; charset=utf-8",
       ".js": "text/javascript; charset=utf-8"
     }[path.extname(filePath)] ?? "application/octet-stream";
-    res.writeHead(200, { "content-type": contentType });
+    res.writeHead(200, { "cache-control": "no-store", "content-type": contentType });
     res.end(data);
   } catch {
     sendJson(res, 404, { error: "Not found" });

@@ -7,6 +7,8 @@ const state = {
   outputPollTimer: null,
   outputPollDelayMs: 1000,
   outputWheelLastSentAt: 0,
+  allYesEnabled: localStorage.getItem("sessionGatewayAllYes") === "1",
+  autoYesSignatures: new Map(),
   cliDeploymentDefaults: {},
   pendingDeleteSession: null,
   customQuickKeys: loadCustomQuickKeys(),
@@ -29,6 +31,7 @@ const translations = {
     save: "保存",
     cancel: "取消",
     delete: "删除",
+    allYes: "All Yes",
     quickKeyTitle: "自定义快捷键",
     quickKeyText: "文本 + 回车",
     stopGeneration: "停止",
@@ -75,6 +78,7 @@ const translations = {
     save: "Save",
     cancel: "Cancel",
     delete: "Delete",
+    allYes: "All Yes",
     quickKeyTitle: "Custom Quick Key",
     quickKeyText: "Text + Enter",
     stopGeneration: "Stop",
@@ -121,6 +125,7 @@ const els = {
   configForm: document.querySelector("#config-form"),
   language: document.querySelector("#language"),
   theme: document.querySelector("#theme"),
+  allYes: document.querySelector("#all-yes"),
   openCreate: document.querySelector("#open-create"),
   createDialog: document.querySelector("#create-dialog"),
   createForm: document.querySelector("#create-form"),
@@ -165,8 +170,20 @@ const els = {
 els.token.value = localStorage.getItem("sessionGatewayToken") || "";
 els.language.value = state.language;
 els.theme.value = state.theme;
+els.allYes.checked = state.allYesEnabled;
 els.token.addEventListener("input", () => {
   localStorage.setItem("sessionGatewayToken", els.token.value);
+});
+els.allYes.addEventListener("change", async () => {
+  state.allYesEnabled = els.allYes.checked;
+  localStorage.setItem("sessionGatewayAllYes", state.allYesEnabled ? "1" : "0");
+  if (state.allYesEnabled) {
+    if (state.selected?.status === "running") {
+      clearOutputEtag(state.selected.id);
+      await loadOutput({ force: true });
+    }
+    maybeAutoYes(els.output.textContent, { force: true });
+  }
 });
 els.language.addEventListener("change", () => {
   state.language = els.language.value;
@@ -451,6 +468,7 @@ function updateOutputText(text) {
     if (shouldStickToBottom) {
       els.output.scrollTop = els.output.scrollHeight;
     }
+    maybeAutoYes(text);
 }
 
 function handleOutputWheel(event) {
@@ -468,6 +486,37 @@ function shouldForwardOutputWheel(event) {
   const canScrollUp = els.output.scrollTop > 0;
   const canScrollDown = els.output.scrollTop + els.output.clientHeight < els.output.scrollHeight - 1;
   return event.deltaY < 0 ? !canScrollUp : !canScrollDown;
+}
+
+function maybeAutoYes(text, options = {}) {
+  if (!state.allYesEnabled || !state.selected || state.selected.status !== "running") return;
+  if (state.selected.kind === "runtime") return;
+  const match = findYesOption(text);
+  if (!match) return;
+  const sessionId = state.selected.id;
+  const signature = match.signature;
+  if (!options.force && state.autoYesSignatures.get(sessionId) === signature) return;
+  sendAutoYes(sessionId, signature);
+}
+
+function findYesOption(text) {
+  const normalized = stripAnsi(text);
+  const lines = normalized
+    .split("\n")
+    .filter((line) => line.trim())
+    .slice(-6);
+  const context = lines.map((line) => line.trim()).join("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (/(?:^|[\s>❯›»])1\s*[\).:\]-]\s*yes\b/i.test(line)) {
+      return { signature: context };
+    }
+  }
+  return null;
+}
+
+function stripAnsi(text) {
+  return text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
 async function sendInput() {
@@ -504,6 +553,21 @@ async function sendQuickText(text) {
       body: JSON.stringify({ text })
     });
     clearOutputEtag(state.selected.id);
+    resetOutputPolling(500);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function sendAutoYes(sessionId, signature) {
+  if (!state.selected || state.selected.id !== sessionId || state.selected.status !== "running") return;
+  try {
+    await api(`/api/sessions/${encodeURIComponent(sessionId)}/input`, {
+      method: "POST",
+      body: JSON.stringify({ text: "1" })
+    });
+    state.autoYesSignatures.set(sessionId, signature);
+    clearOutputEtag(sessionId);
     resetOutputPolling(500);
   } catch (error) {
     showError(error);
@@ -836,6 +900,7 @@ async function refreshSelectedOutput() {
     return;
   }
   const changed = await loadOutput();
+  if (changed === false) maybeAutoYes(els.output.textContent);
   updateOutputPollDelay(changed);
   scheduleOutputPoll(state.outputPollDelayMs);
 }
