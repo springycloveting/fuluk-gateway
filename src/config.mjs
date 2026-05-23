@@ -80,19 +80,12 @@ function normalizeCommandParser(input = {}) {
         ? "rules-first-ai-fallback"
         : "rules-only";
   const enabled = Boolean(current.enabled) && mode === "rules-first-ai-fallback";
-
-  // Prefer environment variable for API key, fall back to settings file
-  const envApiKey = process.env.SESSION_GATEWAY_AI_API_KEY;
-  const apiKey = envApiKey
-    ? envApiKey.trim()
-    : (typeof current.apiKey === "string" ? current.apiKey.trim() : "");
-
   return {
     enabled,
     mode: enabled ? "rules-first-ai-fallback" : mode,
     baseUrl: typeof current.baseUrl === "string" ? current.baseUrl.trim().replace(/\/+$/, "") : "",
     model: typeof current.model === "string" ? current.model.trim() : "",
-    apiKey
+    apiKey: typeof current.apiKey === "string" ? current.apiKey.trim() : ""
   };
 }
 

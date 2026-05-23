@@ -131,14 +131,14 @@ async function handleApi(req, res, url, context) {
   }
 
   if (method === "GET" && pathname === "/api/config") {
-    sendJson(res, 200, { settings: maskSensitiveSettings(config.runtimeSettings), enabled: config.runtimeSettingsEnabled });
+    sendJson(res, 200, { settings: config.runtimeSettings, enabled: config.runtimeSettingsEnabled });
     return;
   }
 
   if (method === "PUT" && pathname === "/api/config") {
     const body = await readJsonBody(req);
     const settings = updateRuntimeSettings(config, body.settings ?? body);
-    sendJson(res, 200, { settings: maskSensitiveSettings(settings) });
+    sendJson(res, 200, { settings });
     return;
   }
 
@@ -604,22 +604,6 @@ function getClientIp(req) {
     return ips[0] || req.socket?.remoteAddress || "unknown";
   }
   return req.socket?.remoteAddress || "unknown";
-}
-
-// Mask sensitive fields in settings before sending to client
-function maskSensitiveSettings(settings) {
-  if (!settings || typeof settings !== "object") return settings;
-
-  const masked = { ...settings };
-
-  if (masked.commandParser && typeof masked.commandParser === "object") {
-    masked.commandParser = {
-      ...masked.commandParser,
-      apiKey: masked.commandParser.apiKey ? "***" : ""
-    };
-  }
-
-  return masked;
 }
 
 function errorMessage(error) {

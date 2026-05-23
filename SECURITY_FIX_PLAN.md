@@ -224,38 +224,27 @@ function sendJson(res, status, payload) {
 
 ### 2.3 Protect API Key Storage
 **Priority**: P1 (High)
-**Files**: `src/config.mjs`, `src/server.mjs`
-**Effort**: 2 hours
+**Files**: `src/config.mjs`, deployment documentation
+**Effort**: 1 hour
 
-**Current Issue**: API key stored in plaintext JSON and returned by `/api/config`.
+**Current Situation**: API key for AI command parser is stored in settings file and displayed in UI.
 
 **Solution**:
-1. Support environment variable for API key:
-```javascript
-// In normalizeCommandParser
-apiKey: process.env.SESSION_GATEWAY_AI_API_KEY ??
-  (typeof current.apiKey === "string" ? current.apiKey.trim() : "")
-```
+1. The API key is configured via web UI (user's own key)
+2. Users need to see if they have configured a key
+3. **Security is achieved through file permissions**, not masking
 
-2. Exclude from API response:
-```javascript
-// In handleApi for /api/config
-const safeSettings = {
-  ...settings,
-  commandParser: {
-    ...settings.commandParser,
-    apiKey: settings.commandParser?.apiKey ? "***" : ""
-  }
-};
-sendJson(res, 200, { settings: safeSettings, enabled: config.runtimeSettingsEnabled });
+**Recommendations**:
+```bash
+# Restrict access to settings file
+chmod 600 /var/lib/session-gateway/session-gateway-settings.json
+chown session-gateway:session-gateway /var/lib/session-gateway/
 ```
 
 **Tasks**:
-- [ ] Add `SESSION_GATEWAY_AI_API_KEY` environment variable support
-- [ ] Mask API key in `/api/config` response
-- [ ] Update frontend to handle masked key
-- [ ] Document the environment variable
-- [ ] Add tests
+- [ ] Document file permission requirements
+- [ ] Add deployment script to set permissions
+- [ ] Document that API key is visible in UI by design
 
 ---
 

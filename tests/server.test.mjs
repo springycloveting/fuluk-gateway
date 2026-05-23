@@ -459,43 +459,6 @@ test("/api/sessions allows runtime session when allowRuntimeMode is true", async
   assert.equal(records[0].kind, "runtime");
 });
 
-test("/api/config masks API key in response", async () => {
-  const context = createCreateSessionContext({ records: [] });
-  context.config.runtimeSettings = {
-    cliDeployment: {},
-    commandParser: {
-      enabled: true,
-      baseUrl: "http://localhost:8000",
-      model: "test-model",
-      apiKey: "super-secret-api-key"
-    }
-  };
-
-  const req = Readable.from([]);
-  req.method = "GET";
-  req.url = "/api/config";
-  req.headers = { host: "localhost", authorization: "Bearer secret" };
-
-  const res = {
-    statusCode: null,
-    headers: null,
-    body: "",
-    writeHead(statusCode, headers) {
-      this.statusCode = statusCode;
-      this.headers = headers;
-    },
-    end(body = "") {
-      this.body = String(body);
-    }
-  };
-
-  await handleSessionGatewayRequest(req, res, context);
-
-  assert.equal(res.statusCode, 200);
-  const parsed = JSON.parse(res.body);
-  assert.equal(parsed.settings.commandParser.apiKey, "***");
-});
-
 test("security headers are added to responses", async () => {
   const context = createCreateSessionContext({ records: [] });
   const { statusCode, headers } = await postJson("/api/sessions", { kind: "codex", name: "test" }, context);

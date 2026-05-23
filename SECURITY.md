@@ -70,12 +70,19 @@ All HTTP responses include security headers:
 - `Referrer-Policy: strict-origin-when-cross-origin`
 - `Permissions-Policy` (restricts browser features)
 
-### API Key Protection
+### API Key Management
 
-API keys for the AI command parser are:
-- Masked in API responses (shown as `***`)
-- Can be stored in environment variable `SESSION_GATEWAY_AI_API_KEY`
-- Never logged in production
+The AI command parser API key is configured through the web UI:
+- Stored in `session-gateway-settings.json`
+- The settings file should have restricted file permissions
+- Users need to see their configured key in the UI (not masked)
+
+**Recommendations:**
+- Restrict file permissions on the settings file:
+  ```bash
+  chmod 600 /var/lib/session-gateway/session-gateway-settings.json
+  ```
+- The settings directory should not be accessible via web server
 
 ### Path Traversal Prevention
 
@@ -112,7 +119,11 @@ Static file serving includes:
 5. **Use environment variables for secrets:**
    ```bash
    SESSION_GATEWAY_TOKEN=your-secure-token
-   SESSION_GATEWAY_AI_API_KEY=your-api-key
+   ```
+
+6. **Restrict settings file permissions:**
+   ```bash
+   chmod 600 /var/lib/session-gateway/session-gateway-settings.json
    ```
 
 ### Monitoring
