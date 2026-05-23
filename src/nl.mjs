@@ -1,11 +1,15 @@
 const kindMap = {
   codex: "codex",
   claude: "claude",
+  "claude code": "claude",
+  claud: "claude",
+  "claud code": "claude",
   opencode: "opencode",
   "open code": "opencode",
   runtime: "runtime",
   本地: "runtime"
 };
+const kindPattern = "codex|claude\\s+code|claud\\s+code|claude|claud|opencode|open code|runtime|本地";
 
 const targetPattern = "[A-Za-z0-9_.-]+";
 
@@ -77,14 +81,14 @@ export function parseNaturalCommand(text) {
   const currentSend = raw.match(/^(?:发送|send)\s*(.+?)\s*[。.]?$/i);
   if (currentSend) return { type: "send", target: null, text: currentSend[1], needsCurrentSession: true };
 
-  const create = raw.match(/新建(?:一个)?\s*(codex|claude|opencode|open code|runtime|本地)\s*会话/iu);
+  const create = parseCreateMatch(normalized);
   if (create) {
-    const kind = kindMap[create[1].toLowerCase()] ?? kindMap[create[1]];
-    const cwd = parseCwd(raw);
-    const explicitName = parseName(raw, kind, cwd);
-    const inlineName = raw.match(/会话\s*([A-Za-z0-9_.-]+)(?:\s*[，,.。]|$)/)?.[1];
+    const kind = normalizeKind(create.kind);
+    const cwd = parseCwd(normalized);
+    const explicitName = parseName(normalized, kind, cwd);
+    const inlineName = normalized.match(/会话\s*([A-Za-z0-9_.-]+)(?:\s*[，,.。]|$)/)?.[1];
     const name = explicitName ?? inlineName;
-    const project = raw.match(/(?:项目|project)\s*([A-Za-z0-9_.-]+)/i)?.[1] ?? null;
+    const project = normalized.match(/(?:项目|project)\s*([A-Za-z0-9_.-]+)/i)?.[1] ?? null;
     return {
       type: "create",
       input: {
@@ -92,51 +96,51 @@ export function parseNaturalCommand(text) {
         cwd,
         name,
         project,
-        ...deploymentInput(raw)
+        ...deploymentInput(normalized)
       }
     };
   }
 
-  const looseZhCreate = raw.match(/(?:新)?建(?:一个)?\s*(codex|claude|opencode|open code|runtime|本地)\s*会话/iu);
+  const looseZhCreate = normalized.match(new RegExp(`(?:新建|创建|建)(?:一个)?\\s*(${kindPattern})\\s*会话`, "iu"));
   if (looseZhCreate) {
-    const kind = kindMap[looseZhCreate[1].toLowerCase()] ?? kindMap[looseZhCreate[1]];
-    const cwd = parseCwd(raw);
+    const kind = normalizeKind(looseZhCreate[1]);
+    const cwd = parseCwd(normalized);
     return {
       type: "create",
       input: {
         kind,
         cwd,
-        name: parseName(raw, kind, cwd),
-        project: raw.match(/(?:项目|project)\s*([A-Za-z0-9_.-]+)/i)?.[1] ?? null,
-        ...deploymentInput(raw)
+        name: parseName(normalized, kind, cwd),
+        project: normalized.match(/(?:项目|project)\s*([A-Za-z0-9_.-]+)/i)?.[1] ?? null,
+        ...deploymentInput(normalized)
       }
     };
   }
 
-  const enCreate = raw.match(/^(?:create|new)\s+(codex|claude|opencode|open code|runtime)\s+(?:session\s+)?(?:named\s+)?([A-Za-z0-9_.-]+)?(?:\s+)?(?:in|cwd|dir|directory)\s+([^\s，。]+)(?:.*?project\s+([A-Za-z0-9_.-]+))?[。.]?$/iu);
+  const enCreate = normalized.match(/^(?:create|new)\s+(codex|claude\s+code|claud\s+code|claude|claud|opencode|open code|runtime)\s+(?:session\s+)?(?:named\s+)?([A-Za-z0-9_.-]+)?(?:\s+)?(?:in|cwd|dir|directory)\s+([^\s，。]+)(?:.*?project\s+([A-Za-z0-9_.-]+))?[。.]?$/iu);
   if (enCreate) {
     return {
       type: "create",
       input: {
-        kind: kindMap[enCreate[1].toLowerCase()],
+        kind: normalizeKind(enCreate[1]),
         cwd: enCreate[3],
         name: enCreate[2] || undefined,
         project: enCreate[4] ?? null,
-        ...deploymentInput(raw)
+        ...deploymentInput(normalized)
       }
     };
   }
 
-  const enCreateDefaultCwd = raw.match(/^(?:create|new)\s+(codex|claude|opencode|open code|runtime)\s+(?:session\s+)?(?:named\s+)?([A-Za-z0-9_.-]+)?[。.]?$/iu);
+  const enCreateDefaultCwd = normalized.match(/^(?:create|new)\s+(codex|claude\s+code|claud\s+code|claude|claud|opencode|open code|runtime)\s+(?:session\s+)?(?:named\s+)?([A-Za-z0-9_.-]+)?[。.]?$/iu);
   if (enCreateDefaultCwd) {
     return {
       type: "create",
       input: {
-        kind: kindMap[enCreateDefaultCwd[1].toLowerCase()],
+        kind: normalizeKind(enCreateDefaultCwd[1]),
         cwd: undefined,
         name: enCreateDefaultCwd[2] || undefined,
         project: null,
-        ...deploymentInput(raw)
+        ...deploymentInput(normalized)
       }
     };
   }
@@ -148,6 +152,28 @@ function normalizeCommandText(value) {
   return value
     .replace(/[绘回对]画/gu, "会话")
     .replace(/[绘回对]话/gu, "会话");
+}
+
+function normalizeKind(value) {
+  return kindMap[value.toLowerCase().replace(/\s+/g, " ")] ?? kindMap[value];
+}
+
+function parseCreateMatch(raw) {
+  const deploymentPrefix = "(?:(?:非\\s*docker|host|本机|宿主机|docker)\\s*(?:模式)?\\s*的?\\s*)?";
+  const beforeSession = raw.match(
+    new RegExp(`(?:新建|创建|建)(?:一个)?\\s*${deploymentPrefix}(${kindPattern})\\s*会话`, "iu")
+  );
+  if (beforeSession) return { kind: beforeSession[1] };
+
+  const afterSession = raw.match(
+    new RegExp(
+      `(?:新建|创建|建)(?:一个)?\\s*${deploymentPrefix}会话\\s*(${kindPattern})`,
+      "iu"
+    )
+  );
+  if (afterSession) return { kind: afterSession[1] };
+
+  return null;
 }
 
 function isListSessionsCommand(raw) {
@@ -247,7 +273,7 @@ function parseName(raw, kind, cwd) {
   if (cwd && /名称\s*用\s*[^，。]*文件夹名称/.test(raw)) {
     return `${kind}-${folderName(cwd)}`;
   }
-  const direct = raw.match(/(?:名字|名称|name)\s*(?:用|为|叫)?\s*([A-Za-z0-9_.+-]+)/i)?.[1];
+  const direct = raw.match(/(?:名字|名称|name)\s*(?:用|为|叫做|叫)?\s*([A-Za-z0-9_.+\-\s]+?)(?:[，。]|$)/i)?.[1];
   if (direct) return normalizeNameExpression(direct, kind, cwd);
   return undefined;
 }

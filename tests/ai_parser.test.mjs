@@ -46,6 +46,8 @@ test("commandManual documents fixed actions and output format", () => {
   assert.match(manual, /发送到web-ai-agent会话xxx/);
   assert.match(manual, /targetIndex to 5/);
   assert.match(manual, /target null lines 50/);
+  assert.match(manual, /deployment.*mode.*host/);
+  assert.match(manual, /创建非docker模式的claude会话/);
   assert.match(manual, /\{"type":"create"/);
   assert.match(manual, /Return JSON only/);
 });
@@ -94,6 +96,29 @@ test("validateAiCommand allows create commands without cwd", () => {
       project: null
     }
   });
+});
+
+test("validateAiCommand preserves allowed create deployment mode", () => {
+  assert.deepEqual(
+    validateAiCommand({
+      type: "create",
+      input: {
+        kind: "claude",
+        name: "claud code AI",
+        deployment: { mode: "host" }
+      }
+    }),
+    {
+      type: "create",
+      input: {
+        kind: "claude",
+        cwd: undefined,
+        name: "claud-code-AI",
+        project: null,
+        deployment: { mode: "host" }
+      }
+    }
+  );
 });
 
 test("validateAiCommand normalizes safe output commands", () => {

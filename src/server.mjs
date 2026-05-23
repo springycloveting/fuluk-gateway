@@ -12,6 +12,8 @@ import { newId, normalizeLines, outputEtag, readJsonBody, sanitizeTmuxName } fro
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(__dirname, "..", "public");
+const SEND_FOLLOWUP_DELAY_MS = 5_000;
+const SEND_FOLLOWUP_LINES = 30;
 
 export function createSessionGatewayServer(options = {}) {
   const config = options.config ?? loadConfig();
@@ -226,7 +228,8 @@ async function handleNaturalLanguage(req, res, context) {
     const session = requireCommandSession(command, body, context);
     await tmux.send(session, command.text);
     store.touch(session.id);
-    sendJson(res, 200, { command, ok: true });
+    const output = await captureAfterSend(session, context);
+    sendJson(res, 200, { command, ok: true, session, output });
     return;
   }
 
@@ -262,14 +265,53 @@ async function handleNaturalLanguage(req, res, context) {
   }
 }
 
+async function captureAfterSend(session, { config, store, tmux }) {
+  const delayMs = config.sendFollowupDelayMs ?? SEND_FOLLOWUP_DELAY_MS;
+  if (delayMs > 0) {
+    if (typeof tmux.sleep === "function") {
+      await tmux.sleep(delayMs);
+    } else {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  const output = await tmux.capture(session, SEND_FOLLOWUP_LINES);
+  store.saveOutput(session.id, SEND_FOLLOWUP_LINES, output);
+  return output;
+}
+
 async function parseCommand(text, { config }) {
+  let command;
   try {
-    return parseNaturalCommand(text);
+    command = parseNaturalCommand(text);
   } catch (ruleError) {
     if (errorMessage(ruleError).startsWith("Ambiguous natural-language command:")) throw ruleError;
     if (!config.runtimeSettings?.commandParser?.enabled) throw ruleError;
-    return parseWithLocalModel(text, config.runtimeSettings);
+    command = await parseWithLocalModel(text, config.runtimeSettings);
   }
+  return applyDeploymentHints(command, text);
+}
+
+function applyDeploymentHints(command, text) {
+  if (command.type !== "create") return command;
+  const deployment = parseDeploymentHint(text);
+  if (!deployment) return command;
+  return {
+    ...command,
+    input: {
+      ...command.input,
+      deployment
+    }
+  };
+}
+
+function parseDeploymentHint(text) {
+  if (/(?:host|非\s*docker|本机|宿主机)\s*(?:模式)?\s*(?:的|运行)?/iu.test(text)) {
+    return { mode: "host" };
+  }
+  if (/(?:在|用)?\s*docker\s*(?:模式)?\s*(?:里|中|内|的)?\s*(?:运行)?/iu.test(text)) {
+    return { mode: "docker" };
+  }
+  return null;
 }
 
 function currentSessionId(body) {

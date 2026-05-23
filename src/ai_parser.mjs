@@ -53,6 +53,7 @@ export function commandManual() {
     "- If the user asks for an unsupported operation, return {\"type\":\"help\"}.",
     "- Allowed type values: create, list, send, output, switch, stop, restart, help.",
     "- Allowed CLI kinds for create: codex, claude, opencode, runtime.",
+    "- Treat 'claude code', 'claud', and 'claud code' as the claude CLI kind.",
     "- Session names and project names should use letters, numbers, dot, underscore, or hyphen.",
     "- If the user says name is '<prefix>+folder name' or '<prefix>+文件夹名称', convert it to '<prefix>-<last path segment>'.",
     "",
@@ -60,6 +61,7 @@ export function commandManual() {
     "- help: user asks for help, command list, usage, or examples.",
     "- list: user asks to query/list/view session lists. Set runningOnly true only when they ask for running/active sessions.",
     "- create: user asks to create/build/start a new codex, claude, opencode, or runtime session. Extract cwd from directory/folder/path wording when present. If no working directory is specified, omit cwd so the server can choose the default.",
+    "- create deployment: if the user says 非docker, non-docker, host, 本机, or 宿主机, include \"deployment\":{\"mode\":\"host\"}. If the user explicitly says docker, include \"deployment\":{\"mode\":\"docker\"}.",
     "- send: user asks to send text/message/instruction to a session. If no target session is named, omit target or set it to null. For text like '发送xxx', strip the send prefix and use only xxx as text. For '发送到web-ai-agent会话xxx', '发送xxx到web-ai-agent会话', or 'xxx到web-ai-agent会话', set target to web-ai-agent and text to xxx. For '发送到第五个会话xxx' or 'xxx到第五个会话', set targetIndex to 5, target to null, and text to xxx.",
     "- output: user asks to show/capture/recent output for a session. Default lines is 50 unless the user gives a number. If no target session is named, omit target or set it to null, meaning the current session.",
     "- ASR-tolerant Chinese: 查看绘画, 查看回话, and 查看对话 mean 查看会话 and should return output target null lines 50.",
@@ -68,7 +70,7 @@ export function commandManual() {
     "- restart: user asks to restart a session. For ordinal session wording, use targetIndex.",
     "",
     "Return schemas:",
-    "{\"type\":\"create\",\"input\":{\"kind\":\"codex|claude|opencode|runtime\",\"cwd\":\"optional /path\",\"name\":\"optional\",\"project\":null}}",
+    "{\"type\":\"create\",\"input\":{\"kind\":\"codex|claude|opencode|runtime\",\"cwd\":\"optional /path\",\"name\":\"optional\",\"project\":null,\"deployment\":{\"mode\":\"optional host|docker\"}}}",
     "{\"type\":\"list\",\"runningOnly\":false}",
     "{\"type\":\"send\",\"target\":\"optional session name or null\",\"targetIndex\":\"optional one-based session position\",\"text\":\"message\"}",
     "{\"type\":\"output\",\"target\":\"optional session name or null\",\"lines\":50}",
@@ -88,6 +90,10 @@ export function commandManual() {
     "JSON: {\"type\":\"create\",\"input\":{\"kind\":\"opencode\",\"cwd\":\"/workspace/OPCAid\",\"name\":\"opencode-OPCAid\",\"project\":null}}",
     "User: 新建 codex 会话 app，目录 /workspace/app",
     "JSON: {\"type\":\"create\",\"input\":{\"kind\":\"codex\",\"cwd\":\"/workspace/app\",\"name\":\"app\",\"project\":null}}",
+    "User: 创建非docker模式的claude会话",
+    "JSON: {\"type\":\"create\",\"input\":{\"kind\":\"claude\",\"project\":null,\"deployment\":{\"mode\":\"host\"}}}",
+    "User: 创建非docker会话claud code.名字叫做claud code AI",
+    "JSON: {\"type\":\"create\",\"input\":{\"kind\":\"claude\",\"name\":\"claud-code-AI\",\"project\":null,\"deployment\":{\"mode\":\"host\"}}}",
     "User: 发送 查看当前项目结构",
     "JSON: {\"type\":\"send\",\"target\":null,\"text\":\"查看当前项目结构\"}",
     "User: 发送修改一下返回的列数",
@@ -149,7 +155,8 @@ export function validateAiCommand(command) {
         kind: input.kind,
         cwd: typeof input.cwd === "string" && input.cwd.trim() ? input.cwd.trim() : undefined,
         name: optionalName(input.name, { sanitize: true }),
-        project: optionalName(input.project, { sanitize: true }) ?? null
+        project: optionalName(input.project, { sanitize: true }) ?? null,
+        ...optionalDeployment(input.deployment)
       }
     };
   }
@@ -229,6 +236,12 @@ function optionalTargetIndex(value) {
     throw new Error("AI command targetIndex must be a positive integer");
   }
   return parsed;
+}
+
+function optionalDeployment(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  if (value.mode !== "host" && value.mode !== "docker") return {};
+  return { deployment: { mode: value.mode } };
 }
 
 function throwError(message) {

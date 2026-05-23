@@ -80,6 +80,7 @@ test("/api/nl send can target a session by list position", async () => {
     { id: "session-2", name: "second", kind: "codex", status: "running", cwd: "/two", tmuxSessionName: "session-2" }
   ];
   const touched = [];
+  const saved = [];
   const store = {
     list() {
       return sessions;
@@ -87,14 +88,22 @@ test("/api/nl send can target a session by list position", async () => {
     touch(sessionId) {
       touched.push(sessionId);
     },
+    saveOutput(sessionId, lines, text) {
+      saved.push({ sessionId, lines, text });
+    },
     findByIdOrName() {
       throw new Error("current session should not be used for targetIndex send");
     }
   };
   const sent = [];
+  const captures = [];
   const tmux = {
     async send(record, text) {
       sent.push({ sessionId: record.id, text });
+    },
+    async capture(record, lines) {
+      captures.push({ sessionId: record.id, lines });
+      return "sent output";
     }
   };
   const req = Readable.from([JSON.stringify({ text: "发送到第二个会话修改配置", currentSessionId: "first" })]);
@@ -121,7 +130,8 @@ test("/api/nl send can target a session by list position", async () => {
     config: {
       authToken: "secret",
       runtimeSettings: {},
-      runtimeSettingsEnabled: false
+      runtimeSettingsEnabled: false,
+      sendFollowupDelayMs: 0
     },
     store,
     tmux
@@ -136,10 +146,14 @@ test("/api/nl send can target a session by list position", async () => {
       text: "修改配置",
       needsCurrentSession: false
     },
-    ok: true
+    ok: true,
+    session: sessions[1],
+    output: "sent output"
   });
   assert.deepEqual(sent, [{ sessionId: "session-2", text: "修改配置" }]);
   assert.deepEqual(touched, ["session-2"]);
+  assert.deepEqual(captures, [{ sessionId: "session-2", lines: 30 }]);
+  assert.deepEqual(saved, [{ sessionId: "session-2", lines: 30, text: "sent output" }]);
 });
 
 test("/api/nl send can target a named session through the submitting send path", async () => {
@@ -152,18 +166,27 @@ test("/api/nl send can target a named session through the submitting send path",
     tmuxSessionName: "glass-to-ai"
   };
   const touched = [];
+  const saved = [];
   const store = {
     findByIdOrName(value) {
       return value === glassSession.id || value === glassSession.name ? glassSession : null;
     },
     touch(sessionId) {
       touched.push(sessionId);
+    },
+    saveOutput(sessionId, lines, text) {
+      saved.push({ sessionId, lines, text });
     }
   };
   const sent = [];
+  const captures = [];
   const tmux = {
     async send(record, text) {
       sent.push({ sessionId: record.id, text, submitted: true });
+    },
+    async capture(record, lines) {
+      captures.push({ sessionId: record.id, lines });
+      return "glass output";
     }
   };
   const req = Readable.from([JSON.stringify({ text: "发送到glass-to-ai会话修改配置", currentSessionId: "other" })]);
@@ -190,7 +213,8 @@ test("/api/nl send can target a named session through the submitting send path",
     config: {
       authToken: "secret",
       runtimeSettings: {},
-      runtimeSettingsEnabled: false
+      runtimeSettingsEnabled: false,
+      sendFollowupDelayMs: 0
     },
     store,
     tmux
@@ -204,10 +228,73 @@ test("/api/nl send can target a named session through the submitting send path",
       text: "修改配置",
       needsCurrentSession: false
     },
-    ok: true
+    ok: true,
+    session: glassSession,
+    output: "glass output"
   });
   assert.deepEqual(sent, [{ sessionId: "session-glass", text: "修改配置", submitted: true }]);
   assert.deepEqual(touched, ["session-glass"]);
+  assert.deepEqual(captures, [{ sessionId: "session-glass", lines: 30 }]);
+  assert.deepEqual(saved, [{ sessionId: "session-glass", lines: 30, text: "glass output" }]);
+});
+
+test("/api/nl send waits before returning 30 lines of current session output", async () => {
+  const session = {
+    id: "session-main",
+    name: "main",
+    kind: "codex",
+    status: "running",
+    cwd: "/workspace/main",
+    tmuxSessionName: "main"
+  };
+  const sleeps = [];
+  const saved = [];
+  const store = {
+    findByIdOrName(value) {
+      return value === session.id || value === session.name ? session : null;
+    },
+    touch() {},
+    saveOutput(sessionId, lines, text) {
+      saved.push({ sessionId, lines, text });
+    }
+  };
+  const calls = [];
+  const tmux = {
+    async send(record, text) {
+      calls.push({ type: "send", sessionId: record.id, text });
+    },
+    async sleep(ms) {
+      sleeps.push(ms);
+      calls.push({ type: "sleep", ms });
+    },
+    async capture(record, lines) {
+      calls.push({ type: "capture", sessionId: record.id, lines });
+      return "after send";
+    }
+  };
+
+  const { statusCode, body } = await postJson("/api/nl", {
+    text: "发送 查看状态",
+    currentSessionId: "main"
+  }, {
+    config: {
+      authToken: "secret",
+      runtimeSettings: {},
+      runtimeSettingsEnabled: false
+    },
+    store,
+    tmux
+  });
+
+  assert.equal(statusCode, 200);
+  assert.equal(JSON.parse(body).output, "after send");
+  assert.deepEqual(sleeps, [5000]);
+  assert.deepEqual(calls, [
+    { type: "send", sessionId: "session-main", text: "查看状态" },
+    { type: "sleep", ms: 5000 },
+    { type: "capture", sessionId: "session-main", lines: 30 }
+  ]);
+  assert.deepEqual(saved, [{ sessionId: "session-main", lines: 30, text: "after send" }]);
 });
 
 test("/api/nl switch can target a session by list position", async () => {
@@ -321,6 +408,21 @@ test("/api/nl create uses default cwd when command omits working directory", asy
   assert.equal(records[0].cwd, "/work/web-ai-agent");
 });
 
+test("/api/nl create applies non-docker text hints after command parsing", async () => {
+  const records = [];
+  const context = createCreateSessionContext({ records });
+  const { statusCode, body } = await postJson("/api/nl", {
+    text: "创建非docker模式的claude会话"
+  }, context);
+
+  assert.equal(statusCode, 201);
+  const parsed = JSON.parse(body);
+  assert.deepEqual(parsed.command.input.deployment, { mode: "host" });
+  assert.equal(parsed.session.command, "claude");
+  assert.match(parsed.session.cwd, /^\/home\/v6\/work\/claude-[A-Za-z0-9-]+$/);
+  assert.equal(records[0].cwd, parsed.session.cwd);
+});
+
 function createCreateSessionContext({ cwdMode, records }) {
   return {
     config: {
@@ -350,7 +452,9 @@ function createCreateSessionContext({ cwdMode, records }) {
     },
     tmux: {
       resolveCreateCommand(input) {
-        if (cwdMode === "host") return { command: "/bin/bash", args: [], cwdMode: "host" };
+        if (cwdMode === "host" || input.deployment?.mode === "host") {
+          return { command: input.kind === "claude" ? "claude" : "/bin/bash", args: [], cwdMode: "host" };
+        }
         return {
           command: "docker",
           args: ["exec", "-w", input.cwd, "-it", input.deployment?.dockerName ?? "worker-codex", input.kind],

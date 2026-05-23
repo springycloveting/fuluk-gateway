@@ -71,6 +71,35 @@ test("parses create commands without cwd for server defaults", () => {
       project: null
     }
   });
+  assert.deepEqual(parseNaturalCommand("新建claude code绘画，名字叫做claude.AI。"), {
+    type: "create",
+    input: {
+      kind: "claude",
+      cwd: undefined,
+      name: "claude.AI",
+      project: null
+    }
+  });
+  assert.deepEqual(parseNaturalCommand("创建非docker会话claud code.名字叫做claud code AI"), {
+    type: "create",
+    input: {
+      kind: "claude",
+      cwd: undefined,
+      name: "claud-code-AI",
+      project: null,
+      deployment: { mode: "host" }
+    }
+  });
+  assert.deepEqual(parseNaturalCommand("创建非docker模式的claude会话"), {
+    type: "create",
+    input: {
+      kind: "claude",
+      cwd: undefined,
+      name: undefined,
+      project: null,
+      deployment: { mode: "host" }
+    }
+  });
   assert.deepEqual(parseNaturalCommand("create runtime session named local-shell"), {
     type: "create",
     input: {
