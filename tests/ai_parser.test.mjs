@@ -40,8 +40,37 @@ test("parseWithLocalModel accepts OpenAI-compatible JSON commands", async () => 
 test("commandManual documents fixed actions and output format", () => {
   const manual = commandManual();
   assert.match(manual, /Allowed type values: create, list, send, output, switch, stop, restart, help/);
+  assert.match(manual, /查询会话列表/);
+  assert.match(manual, /查看绘画/);
+  assert.match(manual, /发送xxx/);
+  assert.match(manual, /发送到web-ai-agent会话xxx/);
+  assert.match(manual, /targetIndex to 5/);
+  assert.match(manual, /target null lines 50/);
   assert.match(manual, /\{"type":"create"/);
   assert.match(manual, /Return JSON only/);
+});
+
+test("validateAiCommand normalizes target-index send commands", () => {
+  assert.deepEqual(validateAiCommand({ type: "send", target: null, targetIndex: 5, text: "修改配置" }), {
+    type: "send",
+    target: null,
+    targetIndex: 5,
+    text: "修改配置",
+    needsCurrentSession: false
+  });
+  assert.throws(
+    () => validateAiCommand({ type: "send", target: null, targetIndex: 0, text: "修改配置" }),
+    /targetIndex/
+  );
+});
+
+test("validateAiCommand normalizes target-index session commands", () => {
+  assert.deepEqual(validateAiCommand({ type: "switch", target: null, targetIndex: 2 }), {
+    type: "switch",
+    target: null,
+    targetIndex: 2
+  });
+  assert.throws(() => validateAiCommand({ type: "switch", target: null }), /requires target/);
 });
 
 test("validateAiCommand rejects unknown actions", () => {
@@ -55,11 +84,30 @@ test("validateAiCommand rejects invalid create kinds", () => {
   );
 });
 
+test("validateAiCommand allows create commands without cwd", () => {
+  assert.deepEqual(validateAiCommand({ type: "create", input: { kind: "codex", name: "web-ai-agent" } }), {
+    type: "create",
+    input: {
+      kind: "codex",
+      cwd: undefined,
+      name: "web-ai-agent",
+      project: null
+    }
+  });
+});
+
 test("validateAiCommand normalizes safe output commands", () => {
   assert.deepEqual(validateAiCommand({ type: "output", target: "codex-app", lines: 5000 }), {
     type: "output",
     target: "codex-app",
-    lines: 2000
+    lines: 2000,
+    needsCurrentSession: false
+  });
+  assert.deepEqual(validateAiCommand({ type: "output", target: null }), {
+    type: "output",
+    target: null,
+    lines: 50,
+    needsCurrentSession: true
   });
 });
 

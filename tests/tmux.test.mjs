@@ -185,3 +185,49 @@ test("tmux targets use exact session matching", () => {
   assert.equal(exactTmuxSessionTarget("localshell"), "=localshell");
   assert.equal(exactTmuxPaneTarget("localshell"), "=localshell:");
 });
+
+test("TmuxBackend send submits text with the configured submit key", async () => {
+  const calls = [];
+  const tmux = new TmuxBackend(
+    {
+      defaultRuntimeCommand: "/bin/bash",
+      submitKeyDelayMs: 0,
+      submitKeys: { codex: "C-j" },
+      cliCommands: {}
+    },
+    {
+      run: async (command, args, timeoutMs) => {
+        calls.push({ command, args, timeoutMs });
+        return { stdout: "" };
+      },
+      sleep: async () => {}
+    }
+  );
+
+  await tmux.send(
+    {
+      id: "session-1",
+      kind: "codex",
+      tmuxSessionName: "glass-to-ai"
+    },
+    "修改配置"
+  );
+
+  assert.deepEqual(calls, [
+    {
+      command: "tmux",
+      args: ["has-session", "-t", "=glass-to-ai"],
+      timeoutMs: 3000
+    },
+    {
+      command: "tmux",
+      args: ["send-keys", "-t", "=glass-to-ai:", "-l", "--", "修改配置"],
+      timeoutMs: undefined
+    },
+    {
+      command: "tmux",
+      args: ["send-keys", "-t", "=glass-to-ai:", "C-j"],
+      timeoutMs: undefined
+    }
+  ]);
+});

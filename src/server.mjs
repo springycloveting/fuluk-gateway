@@ -8,47 +8,61 @@ import { isAuthorizedHeader } from "./auth.mjs";
 import { parseNaturalCommand } from "./nl.mjs";
 import { SessionStore } from "./store.mjs";
 import { TmuxBackend } from "./tmux.mjs";
-import { normalizeLines, outputEtag, readJsonBody } from "./utils.mjs";
+import { newId, normalizeLines, outputEtag, readJsonBody, sanitizeTmuxName } from "./utils.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(__dirname, "..", "public");
-const config = loadConfig();
-const store = new SessionStore(config.databasePath);
-const tmux = new TmuxBackend(config);
 
-const server = http.createServer(async (req, res) => {
+export function createSessionGatewayServer(options = {}) {
+  const config = options.config ?? loadConfig();
+  const store = options.store ?? new SessionStore(config.databasePath);
+  const tmux = options.tmux ?? new TmuxBackend(config);
+  const staticDir = options.publicDir ?? publicDir;
+
+  return http.createServer((req, res) => handleRequest(req, res, { config, store, tmux, publicDir: staticDir }));
+}
+
+export async function handleSessionGatewayRequest(req, res, context) {
+  return handleRequest(req, res, context);
+}
+
+async function handleRequest(req, res, context) {
   try {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
 
     if (url.pathname === "/health") {
-      await handleHealth(res);
+      await handleHealth(res, context);
       return;
     }
 
     if (url.pathname.startsWith("/api/")) {
-      if (!isAuthorized(req)) {
+      if (!isAuthorized(req, context)) {
         sendJson(res, 401, { error: "Unauthorized" });
         return;
       }
       try {
-        await handleApi(req, res, url);
+        await handleApi(req, res, url, context);
       } catch (error) {
         sendJson(res, 400, { error: errorMessage(error) });
       }
       return;
     }
 
-    await serveStatic(res, url.pathname);
+    await serveStatic(res, url.pathname, context);
   } catch (error) {
     sendJson(res, 500, { error: errorMessage(error) });
   }
-});
+}
 
-server.listen(config.port, config.host, () => {
-  console.log(`Session Gateway listening on http://${config.host}:${config.port}`);
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const config = loadConfig();
+  const server = createSessionGatewayServer({ config });
+  server.listen(config.port, config.host, () => {
+    console.log(`Session Gateway listening on http://${config.host}:${config.port}`);
+  });
+}
 
-async function handleHealth(res) {
+async function handleHealth(res, { tmux }) {
   try {
     await tmux.ensureAvailable();
     sendJson(res, 200, { ok: true, tmux: true });
@@ -57,26 +71,27 @@ async function handleHealth(res) {
   }
 }
 
-async function handleApi(req, res, url) {
+async function handleApi(req, res, url, context) {
   const method = req.method ?? "GET";
   const pathname = url.pathname;
+  const { config, store } = context;
 
   if (method === "GET" && pathname === "/api/sessions") {
-    const sessions = await refreshStatuses(store.list());
+    const sessions = await refreshStatuses(store.list(), context);
     sendJson(res, 200, { sessions });
     return;
   }
 
   if (method === "POST" && pathname === "/api/sessions") {
     const body = await readJsonBody(req);
-    const input = parseCreateInput(body);
-    const session = await createSession(input);
+    const input = parseCreateInput(body, context);
+    const session = await createSession(input, context);
     sendJson(res, 201, { session });
     return;
   }
 
   if (method === "POST" && pathname === "/api/nl") {
-    await handleNaturalLanguage(req, res);
+    await handleNaturalLanguage(req, res, context);
     return;
   }
 
@@ -96,15 +111,16 @@ async function handleApi(req, res, url) {
   if (sessionRoute) {
     const idOrName = decodeURIComponent(sessionRoute[1]);
     const action = sessionRoute[2] ?? "";
-    await handleSessionAction(req, res, url, method, idOrName, action);
+    await handleSessionAction(req, res, url, method, idOrName, action, context);
     return;
   }
 
   sendJson(res, 404, { error: "Not found" });
 }
 
-async function handleSessionAction(req, res, url, method, idOrName, action) {
-  const session = requireSession(idOrName);
+async function handleSessionAction(req, res, url, method, idOrName, action, context) {
+  const { store, tmux } = context;
+  const session = requireSession(idOrName, context);
 
   if (method === "GET" && action === "output") {
     const lines = normalizeLines(url.searchParams.get("lines"));
@@ -181,24 +197,25 @@ function isAllowedTmuxKey(key) {
   );
 }
 
-async function handleNaturalLanguage(req, res) {
+async function handleNaturalLanguage(req, res, context) {
   const body = await readJsonBody(req);
   if (typeof body.text !== "string") throw new Error("text is required");
+  const { store, tmux } = context;
 
-  const command = await parseCommand(body.text);
+  const command = await parseCommand(body.text, context);
   if (command.type === "create") {
-    const session = await createSession(command.input);
+    const session = await createSession(command.input, context);
     sendJson(res, 201, { command, session });
     return;
   }
 
   if (command.type === "help") {
-    sendText(res, 200, commandHelpText());
+    sendJson(res, 200, { command, help: commandHelpText() });
     return;
   }
 
   if (command.type === "list") {
-    const sessions = (await refreshStatuses(store.list())).filter(
+    const sessions = (await refreshStatuses(store.list(), context)).filter(
       (session) => !command.runningOnly || session.status === "running"
     );
     sendJson(res, 200, { command, sessions });
@@ -206,7 +223,7 @@ async function handleNaturalLanguage(req, res) {
   }
 
   if (command.type === "send") {
-    const session = requireSession(command.target ?? currentSessionId(body));
+    const session = requireCommandSession(command, body, context);
     await tmux.send(session, command.text);
     store.touch(session.id);
     sendJson(res, 200, { command, ok: true });
@@ -214,15 +231,15 @@ async function handleNaturalLanguage(req, res) {
   }
 
   if (command.type === "output") {
-    const session = requireSession(command.target);
+    const session = requireCommandSession(command, body, context);
     const text = await tmux.capture(session, command.lines);
     store.saveOutput(session.id, command.lines, text);
-    sendText(res, 200, text);
+    sendJson(res, 200, { command, session, output: text });
     return;
   }
 
   if (command.type === "switch") {
-    const session = requireSession(command.target);
+    const session = requireCommandSession(command, body, context);
     const text = await tmux.capture(session, 120);
     store.saveOutput(session.id, 120, text);
     sendJson(res, 200, { command, session, output: text });
@@ -230,7 +247,7 @@ async function handleNaturalLanguage(req, res) {
   }
 
   if (command.type === "stop") {
-    const session = requireSession(command.target);
+    const session = requireCommandSession(command, body, context);
     await tmux.stop(session);
     store.updateStatus(session.id, "stopped");
     sendJson(res, 200, { command, ok: true });
@@ -238,17 +255,18 @@ async function handleNaturalLanguage(req, res) {
   }
 
   if (command.type === "restart") {
-    const session = requireSession(command.target);
+    const session = requireCommandSession(command, body, context);
     await tmux.restart(session);
     store.markRunning(session.id);
     sendJson(res, 200, { command, session: store.findByIdOrName(session.id) });
   }
 }
 
-async function parseCommand(text) {
+async function parseCommand(text, { config }) {
   try {
     return parseNaturalCommand(text);
   } catch (ruleError) {
+    if (errorMessage(ruleError).startsWith("Ambiguous natural-language command:")) throw ruleError;
     if (!config.runtimeSettings?.commandParser?.enabled) throw ruleError;
     return parseWithLocalModel(text, config.runtimeSettings);
   }
@@ -261,15 +279,32 @@ function currentSessionId(body) {
   throw new Error("Command requires a target session or selected current session");
 }
 
+function requireCommandSession(command, body, context) {
+  if (command.targetIndex) return requireSessionByIndex(command.targetIndex, context);
+  return requireSession(command.target ?? currentSessionId(body), context);
+}
+
+function requireSessionByIndex(index, { store }) {
+  const sessions = store.list();
+  const session = sessions[index - 1];
+  if (!session) throw new Error(`Session not found at position: ${index}`);
+  return session;
+}
+
 function commandHelpText() {
   return [
     "Run Command supports these safe actions:",
     "帮助 / help",
     "列出会话 / list sessions",
+    "查询会话列表",
     "列出运行中的会话 / list running sessions",
     "新建 codex 会话 app，目录 /workspace/app",
     "create codex session app in /workspace/app",
-    "发送 查看当前项目结构 / send inspect this repo",
+    "查看会话 / 查看绘画：显示当前会话最近 50 行",
+    "发送 修改一下返回的列数 / send inspect this repo",
+    "发送到 web-ai-agent 会话 修改配置",
+    "发送 修改配置 到 web-ai-agent 会话",
+    "发送到第五个会话 修改配置",
     "把消息发给 codex-app：npm test / send npm test to codex-app",
     "codex-app 最近 200 行输出 / output codex-app 200",
     "进入 codex-app / use codex-app",
@@ -278,10 +313,12 @@ function commandHelpText() {
   ].join("\n");
 }
 
-async function createSession(input) {
-  const commandSpec = tmux.resolveCreateCommand(input);
+async function createSession(input, context) {
+  const { store, tmux } = context;
+  const preparedInput = prepareCreateInput(input, tmux);
+  const commandSpec = tmux.resolveCreateCommand(preparedInput);
   await tmux.ensureAvailable();
-  const existingSession = findExistingNamedSession(input);
+  const existingSession = findExistingNamedSession(preparedInput, context);
   if (existingSession) {
     const isRunning = await tmux.exists(existingSession);
     store.updateStatus(existingSession.id, isRunning ? "running" : "stopped");
@@ -289,11 +326,11 @@ async function createSession(input) {
       throw new Error(`Session name already exists and is running: ${existingSession.name}`);
     }
   }
-  await tmux.validateCreateInput(input, commandSpec);
+  await tmux.validateCreateInput(preparedInput, commandSpec);
 
   const session = existingSession
-    ? store.replace(existingSession.id, input, commandSpec.command, commandSpec.args)
-    : store.create(input, commandSpec.command, commandSpec.args);
+    ? store.replace(existingSession.id, preparedInput, commandSpec.command, commandSpec.args)
+    : store.create(preparedInput, commandSpec.command, commandSpec.args);
 
   try {
     await tmux.create(session);
@@ -304,7 +341,27 @@ async function createSession(input) {
   }
 }
 
-async function refreshStatuses(sessions) {
+function prepareCreateInput(input, tmux) {
+  const name = input.name?.trim() || `${input.kind}-${newId().slice(0, 8)}`;
+  if (typeof input.cwd === "string" && input.cwd.trim()) {
+    return { ...input, name, cwd: input.cwd.trim() };
+  }
+
+  const commandSpec = tmux.resolveCreateCommand({ ...input, name, cwd: "/" });
+  return {
+    ...input,
+    name,
+    cwd: defaultCwdForSession(name, commandSpec.cwdMode)
+  };
+}
+
+function defaultCwdForSession(name, cwdMode) {
+  const folder = sanitizeTmuxName(name);
+  const baseDir = cwdMode === "container" ? "/work" : "/home/v6/work";
+  return path.posix.join(baseDir, folder);
+}
+
+async function refreshStatuses(sessions, { store, tmux }) {
   for (const session of sessions) {
     const exists = await tmux.exists(session);
     const nextStatus = exists ? "running" : "stopped";
@@ -313,21 +370,20 @@ async function refreshStatuses(sessions) {
   return store.list();
 }
 
-function findExistingNamedSession(input) {
+function findExistingNamedSession(input, { store }) {
   const name = input.name?.trim();
   if (!name) return null;
   const existing = store.findByIdOrName(name);
   return existing?.name === name ? existing : null;
 }
 
-function parseCreateInput(body) {
+function parseCreateInput(body, context) {
   if (!isSessionKind(body.kind)) throw new Error("kind must be codex, claude, opencode, or runtime");
-  if (typeof body.cwd !== "string" || !body.cwd.trim()) throw new Error("cwd is required");
-  const deployment = parseCreateDeployment(body.kind, body);
+  const deployment = parseCreateDeployment(body.kind, body, context);
 
   return {
     kind: body.kind,
-    cwd: body.cwd,
+    cwd: typeof body.cwd === "string" && body.cwd.trim() ? body.cwd.trim() : undefined,
     name: typeof body.name === "string" ? body.name : undefined,
     project: typeof body.project === "string" ? body.project : null,
     deployment,
@@ -340,7 +396,7 @@ function parseCreateInput(body) {
   };
 }
 
-function parseCreateDeployment(kind, body) {
+function parseCreateDeployment(kind, body, { config }) {
   if (kind === "runtime") return null;
   const mode = body.deploymentMode ?? body.deployment?.mode;
   if (mode === undefined || mode === null || mode === "") return null;
@@ -359,17 +415,18 @@ function isSessionKind(value) {
   return value === "codex" || value === "claude" || value === "opencode" || value === "runtime";
 }
 
-function requireSession(idOrName) {
+function requireSession(idOrName, { store }) {
   const session = store.findByIdOrName(idOrName);
   if (!session) throw new Error(`Session not found: ${idOrName}`);
   return session;
 }
 
-function isAuthorized(req) {
+function isAuthorized(req, { config }) {
   return isAuthorizedHeader(req.headers.authorization, config.authToken);
 }
 
-async function serveStatic(res, pathname) {
+async function serveStatic(res, pathname, context) {
+  const publicDir = context.publicDir;
   const safePath = pathname === "/" ? "/index.html" : pathname;
   const filePath = path.resolve(publicDir, `.${safePath}`);
   if (!filePath.startsWith(publicDir)) {

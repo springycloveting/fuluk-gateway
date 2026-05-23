@@ -5,7 +5,7 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 export class TmuxBackend {
-  constructor(config) {
+  constructor(config, options = {}) {
     this.config = {
       ...config,
       submitKeyDelayMs: config.submitKeyDelayMs ?? 80,
@@ -17,11 +17,13 @@ export class TmuxBackend {
         ...(config.submitKeys ?? {})
       }
     };
+    this.run = options.run ?? run;
+    this.sleep = options.sleep ?? sleep;
   }
 
   async ensureAvailable() {
     try {
-      await run("tmux", ["-V"], 3_000);
+      await this.run("tmux", ["-V"], 3_000);
     } catch {
       throw new Error("tmux is required but was not found in PATH");
     }
@@ -67,14 +69,14 @@ export class TmuxBackend {
     if (record.command !== "docker") {
       args.push("-c", record.cwd);
     }
-    await run("tmux", args);
-    await run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), "-l", "--", shellCommand]);
-    await run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), "Enter"]);
+    await this.run("tmux", args);
+    await this.run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), "-l", "--", shellCommand]);
+    await this.run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), "Enter"]);
   }
 
   async exists(record) {
     try {
-      await run("tmux", ["has-session", "-t", exactTmuxSessionTarget(record.tmuxSessionName)], 3_000);
+      await this.run("tmux", ["has-session", "-t", exactTmuxSessionTarget(record.tmuxSessionName)], 3_000);
       return true;
     } catch {
       return false;
@@ -83,19 +85,24 @@ export class TmuxBackend {
 
   async send(record, text) {
     await this.ensureSessionExists(record);
-    await run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), "-l", "--", text]);
-    await sleep(this.config.submitKeyDelayMs);
-    await run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), this.config.submitKeys[record.kind]]);
+    await this.run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), "-l", "--", text]);
+    await this.sleep(this.config.submitKeyDelayMs);
+    await this.run("tmux", [
+      "send-keys",
+      "-t",
+      exactTmuxPaneTarget(record.tmuxSessionName),
+      this.config.submitKeys[record.kind] || "Enter"
+    ]);
   }
 
   async sendKeys(record, keys) {
     await this.ensureSessionExists(record);
-    await run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), ...keys]);
+    await this.run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), ...keys]);
   }
 
   async capture(record, lines) {
     await this.ensureSessionExists(record);
-    const { stdout } = await run("tmux", [
+    const { stdout } = await this.run("tmux", [
       "capture-pane",
       "-pt",
       exactTmuxPaneTarget(record.tmuxSessionName),
@@ -107,7 +114,7 @@ export class TmuxBackend {
 
   async stop(record) {
     if (await this.exists(record)) {
-      await run("tmux", ["kill-session", "-t", exactTmuxSessionTarget(record.tmuxSessionName)]);
+      await this.run("tmux", ["kill-session", "-t", exactTmuxSessionTarget(record.tmuxSessionName)]);
     }
   }
 

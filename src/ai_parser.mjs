@@ -58,22 +58,23 @@ export function commandManual() {
     "",
     "Operation manual:",
     "- help: user asks for help, command list, usage, or examples.",
-    "- list: user asks to list/view sessions. Set runningOnly true only when they ask for running/active sessions.",
-    "- create: user asks to create/build/start a new codex, claude, opencode, or runtime session. Extract cwd from directory/folder/path wording. cwd is required.",
-    "- send: user asks to send text/message/instruction to a session. If no target session is named, omit target or set it to null.",
-    "- output: user asks to show/capture/recent output for a session. Default lines is 120 unless the user gives a number.",
-    "- switch: user asks to enter/use/switch to a session.",
-    "- stop: user asks to stop/end a session.",
-    "- restart: user asks to restart a session.",
+    "- list: user asks to query/list/view session lists. Set runningOnly true only when they ask for running/active sessions.",
+    "- create: user asks to create/build/start a new codex, claude, opencode, or runtime session. Extract cwd from directory/folder/path wording when present. If no working directory is specified, omit cwd so the server can choose the default.",
+    "- send: user asks to send text/message/instruction to a session. If no target session is named, omit target or set it to null. For text like '发送xxx', strip the send prefix and use only xxx as text. For '发送到web-ai-agent会话xxx', '发送xxx到web-ai-agent会话', or 'xxx到web-ai-agent会话', set target to web-ai-agent and text to xxx. For '发送到第五个会话xxx' or 'xxx到第五个会话', set targetIndex to 5, target to null, and text to xxx.",
+    "- output: user asks to show/capture/recent output for a session. Default lines is 50 unless the user gives a number. If no target session is named, omit target or set it to null, meaning the current session.",
+    "- ASR-tolerant Chinese: 查看绘画, 查看回话, and 查看对话 mean 查看会话 and should return output target null lines 50.",
+    "- switch: user asks to enter/use/switch to a session. For '切换到第二个会话', set targetIndex to 2 and target to null.",
+    "- stop: user asks to stop/end a session. For ordinal session wording, use targetIndex.",
+    "- restart: user asks to restart a session. For ordinal session wording, use targetIndex.",
     "",
     "Return schemas:",
-    "{\"type\":\"create\",\"input\":{\"kind\":\"codex|claude|opencode|runtime\",\"cwd\":\"/path\",\"name\":\"optional\",\"project\":null}}",
+    "{\"type\":\"create\",\"input\":{\"kind\":\"codex|claude|opencode|runtime\",\"cwd\":\"optional /path\",\"name\":\"optional\",\"project\":null}}",
     "{\"type\":\"list\",\"runningOnly\":false}",
-    "{\"type\":\"send\",\"target\":\"optional session name or null\",\"text\":\"message\"}",
-    "{\"type\":\"output\",\"target\":\"session name\",\"lines\":120}",
-    "{\"type\":\"switch\",\"target\":\"session name\"}",
-    "{\"type\":\"stop\",\"target\":\"session name\"}",
-    "{\"type\":\"restart\",\"target\":\"session name\"}",
+    "{\"type\":\"send\",\"target\":\"optional session name or null\",\"targetIndex\":\"optional one-based session position\",\"text\":\"message\"}",
+    "{\"type\":\"output\",\"target\":\"optional session name or null\",\"lines\":50}",
+    "{\"type\":\"switch\",\"target\":\"optional session name or null\",\"targetIndex\":\"optional one-based session position\"}",
+    "{\"type\":\"stop\",\"target\":\"optional session name or null\",\"targetIndex\":\"optional one-based session position\"}",
+    "{\"type\":\"restart\",\"target\":\"optional session name or null\",\"targetIndex\":\"optional one-based session position\"}",
     "{\"type\":\"help\"}",
     "",
     "Examples:",
@@ -81,18 +82,38 @@ export function commandManual() {
     "JSON: {\"type\":\"help\"}",
     "User: 列出运行中的会话",
     "JSON: {\"type\":\"list\",\"runningOnly\":true}",
+    "User: 查询会话列表",
+    "JSON: {\"type\":\"list\",\"runningOnly\":false}",
     "User: 建一个opencode会话，用/workspace/OPCAid文件夹，会话名称用opencode+文件夹名称",
     "JSON: {\"type\":\"create\",\"input\":{\"kind\":\"opencode\",\"cwd\":\"/workspace/OPCAid\",\"name\":\"opencode-OPCAid\",\"project\":null}}",
     "User: 新建 codex 会话 app，目录 /workspace/app",
     "JSON: {\"type\":\"create\",\"input\":{\"kind\":\"codex\",\"cwd\":\"/workspace/app\",\"name\":\"app\",\"project\":null}}",
     "User: 发送 查看当前项目结构",
     "JSON: {\"type\":\"send\",\"target\":null,\"text\":\"查看当前项目结构\"}",
+    "User: 发送修改一下返回的列数",
+    "JSON: {\"type\":\"send\",\"target\":null,\"text\":\"修改一下返回的列数\"}",
+    "User: 发送到web-ai-agent会话修改配置",
+    "JSON: {\"type\":\"send\",\"target\":\"web-ai-agent\",\"text\":\"修改配置\"}",
+    "User: 发送修改配置到web-ai-agent会话",
+    "JSON: {\"type\":\"send\",\"target\":\"web-ai-agent\",\"text\":\"修改配置\"}",
+    "User: 你好到web-ai-agent会话",
+    "JSON: {\"type\":\"send\",\"target\":\"web-ai-agent\",\"text\":\"你好\"}",
+    "User: 你好到第四个会话",
+    "JSON: {\"type\":\"send\",\"target\":null,\"targetIndex\":4,\"text\":\"你好\"}",
+    "User: 发送到第五个会话修改配置",
+    "JSON: {\"type\":\"send\",\"target\":null,\"targetIndex\":5,\"text\":\"修改配置\"}",
     "User: 把 npm test 发给 codex-app",
     "JSON: {\"type\":\"send\",\"target\":\"codex-app\",\"text\":\"npm test\"}",
+    "User: 查看绘画",
+    "JSON: {\"type\":\"output\",\"target\":null,\"lines\":50}",
+    "User: 查看会话",
+    "JSON: {\"type\":\"output\",\"target\":null,\"lines\":50}",
     "User: codex-app 最近 200 行输出",
     "JSON: {\"type\":\"output\",\"target\":\"codex-app\",\"lines\":200}",
     "User: 进入 local",
     "JSON: {\"type\":\"switch\",\"target\":\"local\"}",
+    "User: 切换到第二个会话",
+    "JSON: {\"type\":\"switch\",\"target\":null,\"targetIndex\":2}",
     "User: 停止 opencode-OPCAid",
     "JSON: {\"type\":\"stop\",\"target\":\"opencode-OPCAid\"}",
     "User: 重启 sessions",
@@ -122,14 +143,11 @@ export function validateAiCommand(command) {
     if (!ALLOWED_KINDS.has(input.kind)) {
       throw new Error("AI create command kind is not allowed");
     }
-    if (typeof input.cwd !== "string" || !input.cwd.trim()) {
-      throw new Error("AI create command requires cwd");
-    }
     return {
       type: "create",
       input: {
         kind: input.kind,
-        cwd: input.cwd.trim(),
+        cwd: typeof input.cwd === "string" && input.cwd.trim() ? input.cwd.trim() : undefined,
         name: optionalName(input.name, { sanitize: true }),
         project: optionalName(input.project, { sanitize: true }) ?? null
       }
@@ -141,25 +159,35 @@ export function validateAiCommand(command) {
       throw new Error("AI send command requires text");
     }
     const target = optionalName(command.target);
+    const targetIndex = optionalTargetIndex(command.targetIndex);
     return {
       type: "send",
       target: target ?? null,
+      ...(targetIndex ? { targetIndex } : {}),
       text: command.text.trim(),
-      needsCurrentSession: !target
+      needsCurrentSession: !target && !targetIndex
     };
   }
 
   if (command.type === "output") {
+    const target = optionalName(command.target);
     return {
       type: "output",
-      target: requiredName(command.target, "AI output command requires target"),
-      lines: normalizeLines(command.lines, 120)
+      target: target ?? null,
+      lines: normalizeLines(command.lines, 50),
+      needsCurrentSession: !target
     };
   }
 
+  const target = optionalName(command.target);
+  const targetIndex = optionalTargetIndex(command.targetIndex);
+  if (!target && !targetIndex) {
+    throw new Error(`AI ${command.type} command requires target`);
+  }
   return {
     type: command.type,
-    target: requiredName(command.target, `AI ${command.type} command requires target`)
+    target: target ?? null,
+    ...(targetIndex ? { targetIndex } : {})
   };
 }
 
@@ -192,6 +220,15 @@ function optionalName(value, options = {}) {
 
 function requiredName(value, message) {
   return optionalName(value) ?? throwError(message);
+}
+
+function optionalTargetIndex(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 2000) {
+    throw new Error("AI command targetIndex must be a positive integer");
+  }
+  return parsed;
 }
 
 function throwError(message) {

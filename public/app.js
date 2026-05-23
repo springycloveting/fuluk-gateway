@@ -62,7 +62,7 @@ const translations = {
     statusStopped: "停止",
     sendPlaceholder: "发送到当前会话",
     namePlaceholder: "会话名，例如 codex-app",
-    cwdPlaceholder: "工作目录，例如 /workspace/app",
+    cwdPlaceholder: "工作目录，留空则使用默认会话目录",
     projectPlaceholder: "项目名",
     nlPlaceholder: "帮助 / 发送 查看当前项目结构 / 新建 codex 会话 app，目录 /workspace/app"
   },
@@ -109,7 +109,7 @@ const translations = {
     statusStopped: "Stopped",
     sendPlaceholder: "Send text to selected session",
     namePlaceholder: "Session name, e.g. codex-app",
-    cwdPlaceholder: "Working directory, e.g. /workspace/app",
+    cwdPlaceholder: "Working directory; leave blank for the default session folder",
     projectPlaceholder: "Project",
     nlPlaceholder: "help / send inspect this repo / create codex session app in /workspace/app"
   }
@@ -855,7 +855,9 @@ function showError(error) {
 function formatCommandResult(result) {
   if (!result || typeof result !== "object") return String(result);
   if (Array.isArray(result.sessions)) return formatSessionList(result.sessions);
+  if (result.command?.type === "help" && typeof result.help === "string") return result.help;
   if (result.command?.type === "send") return state.language === "zh" ? "已发送。" : "Sent.";
+  if (result.command?.type === "output") return state.language === "zh" ? "已显示最近输出。" : "Recent output shown.";
   if (result.command?.type === "stop") return state.language === "zh" ? "已停止。" : "Stopped.";
   if (result.command?.type === "restart") return state.language === "zh" ? "已重启。" : "Restarted.";
   if (result.command?.type === "create" && result.session) {

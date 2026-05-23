@@ -61,12 +61,76 @@ test("parses explicit create deployment mode", () => {
   });
 });
 
+test("parses create commands without cwd for server defaults", () => {
+  assert.deepEqual(parseNaturalCommand("新建一个 codex 会话 web-ai-agent"), {
+    type: "create",
+    input: {
+      kind: "codex",
+      cwd: undefined,
+      name: "web-ai-agent",
+      project: null
+    }
+  });
+  assert.deepEqual(parseNaturalCommand("create runtime session named local-shell"), {
+    type: "create",
+    input: {
+      kind: "runtime",
+      cwd: undefined,
+      name: "local-shell",
+      project: null
+    }
+  });
+});
+
 test("parses send commands", () => {
   assert.deepEqual(parseNaturalCommand("把这句话发给 claude-main：查看。"), {
     type: "send",
     target: "claude-main",
     text: "查看"
   });
+  assert.deepEqual(parseNaturalCommand("发送到web-ai-agent会话修改配置"), {
+    type: "send",
+    target: "web-ai-agent",
+    text: "修改配置",
+    needsCurrentSession: false
+  });
+  assert.deepEqual(parseNaturalCommand("发送修改配置到web-ai-agent会话"), {
+    type: "send",
+    target: "web-ai-agent",
+    text: "修改配置",
+    needsCurrentSession: false
+  });
+  assert.deepEqual(parseNaturalCommand("你好到第四个会话"), {
+    type: "send",
+    target: null,
+    targetIndex: 4,
+    text: "你好",
+    needsCurrentSession: false
+  });
+  assert.deepEqual(parseNaturalCommand("你好到web-ai-agent会话"), {
+    type: "send",
+    target: "web-ai-agent",
+    text: "你好",
+    needsCurrentSession: false
+  });
+  assert.deepEqual(parseNaturalCommand("发送到第五个会话修改配置"), {
+    type: "send",
+    target: null,
+    targetIndex: 5,
+    text: "修改配置",
+    needsCurrentSession: false
+  });
+  assert.deepEqual(parseNaturalCommand("发送到第12个会话npm test"), {
+    type: "send",
+    target: null,
+    targetIndex: 12,
+    text: "npm test",
+    needsCurrentSession: false
+  });
+  assert.throws(
+    () => parseNaturalCommand("发送处理失败，Session gateway http 400到第一个会话，给你发了一堆日志"),
+    /Ambiguous natural-language command/
+  );
 });
 
 test("parses current-session send commands", () => {
@@ -74,6 +138,12 @@ test("parses current-session send commands", () => {
     type: "send",
     target: null,
     text: "查看当前项目结构",
+    needsCurrentSession: true
+  });
+  assert.deepEqual(parseNaturalCommand("发送修改一下返回的列数"), {
+    type: "send",
+    target: null,
+    text: "修改一下返回的列数",
     needsCurrentSession: true
   });
 });
@@ -94,6 +164,75 @@ test("parses output commands with line counts", () => {
   });
 });
 
+test("parses current-session output commands", () => {
+  assert.deepEqual(parseNaturalCommand("查看会话"), {
+    type: "output",
+    target: null,
+    lines: 50,
+    needsCurrentSession: true
+  });
+  assert.deepEqual(parseNaturalCommand("查看当前会话"), {
+    type: "output",
+    target: null,
+    lines: 50,
+    needsCurrentSession: true
+  });
+  assert.deepEqual(parseNaturalCommand("显示会话"), {
+    type: "output",
+    target: null,
+    lines: 50,
+    needsCurrentSession: true
+  });
+  assert.deepEqual(parseNaturalCommand("看一下会话"), {
+    type: "output",
+    target: null,
+    lines: 50,
+    needsCurrentSession: true
+  });
+  assert.deepEqual(parseNaturalCommand("查看会话后 100 行"), {
+    type: "output",
+    target: null,
+    lines: 100,
+    needsCurrentSession: true
+  });
+});
+
+test("parses ASR-tolerant current-session output commands", () => {
+  assert.deepEqual(parseNaturalCommand("查看绘画"), {
+    type: "output",
+    target: null,
+    lines: 50,
+    needsCurrentSession: true
+  });
+  assert.deepEqual(parseNaturalCommand("查看回话"), {
+    type: "output",
+    target: null,
+    lines: 50,
+    needsCurrentSession: true
+  });
+  assert.deepEqual(parseNaturalCommand("查看对话"), {
+    type: "output",
+    target: null,
+    lines: 50,
+    needsCurrentSession: true
+  });
+});
+
+test("parses session-list commands before send fallback", () => {
+  assert.deepEqual(parseNaturalCommand("查询会话列表"), {
+    type: "list",
+    runningOnly: false
+  });
+  assert.deepEqual(parseNaturalCommand("列出会话"), {
+    type: "list",
+    runningOnly: false
+  });
+  assert.deepEqual(parseNaturalCommand("列出运行中的会话"), {
+    type: "list",
+    runningOnly: true
+  });
+});
+
 test("parses running list commands", () => {
   assert.deepEqual(parseNaturalCommand("列出所有运行中的会话。"), {
     type: "list",
@@ -105,6 +244,19 @@ test("parses stop commands", () => {
   assert.deepEqual(parseNaturalCommand("停止 opencode-test。"), {
     type: "stop",
     target: "opencode-test"
+  });
+});
+
+test("parses ordinal switch commands", () => {
+  assert.deepEqual(parseNaturalCommand("切换到第二个会话"), {
+    type: "switch",
+    target: null,
+    targetIndex: 2
+  });
+  assert.deepEqual(parseNaturalCommand("进入第4个会话"), {
+    type: "switch",
+    target: null,
+    targetIndex: 4
   });
 });
 
