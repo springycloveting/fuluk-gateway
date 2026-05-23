@@ -12,10 +12,14 @@ export function loadConfig() {
   const settingsPath =
     process.env.SESSION_GATEWAY_SETTINGS ??
     path.resolve(process.cwd(), "data", "session-gateway-settings.json");
+
+  const authToken = loadAuthToken();
+
   return {
     host: process.env.HOST ?? "127.0.0.1",
     port: Number.parseInt(process.env.PORT ?? "8787", 10),
-    authToken: process.env.SESSION_GATEWAY_TOKEN ?? "dev-token",
+    authToken,
+    allowRuntimeMode: process.env.SESSION_GATEWAY_ALLOW_RUNTIME === "true",
     settingsPath,
     runtimeSettingsEnabled: fs.existsSync(settingsPath),
     runtimeSettings: loadRuntimeSettings(settingsPath),
@@ -74,14 +78,21 @@ function normalizeCommandParser(input = {}) {
       ? current.mode
       : current.enabled
         ? "rules-first-ai-fallback"
-      : "rules-only";
+        : "rules-only";
   const enabled = Boolean(current.enabled) && mode === "rules-first-ai-fallback";
+
+  // Prefer environment variable for API key, fall back to settings file
+  const envApiKey = process.env.SESSION_GATEWAY_AI_API_KEY;
+  const apiKey = envApiKey
+    ? envApiKey.trim()
+    : (typeof current.apiKey === "string" ? current.apiKey.trim() : "");
+
   return {
     enabled,
     mode: enabled ? "rules-first-ai-fallback" : mode,
     baseUrl: typeof current.baseUrl === "string" ? current.baseUrl.trim().replace(/\/+$/, "") : "",
     model: typeof current.model === "string" ? current.model.trim() : "",
-    apiKey: typeof current.apiKey === "string" ? current.apiKey.trim() : ""
+    apiKey
   };
 }
 
@@ -100,4 +111,30 @@ function loadRuntimeSettings(settingsPath) {
   } catch {
     return normalizeRuntimeSettings();
   }
+}
+
+function loadAuthToken() {
+  const token = process.env.SESSION_GATEWAY_TOKEN;
+
+  if (!token) {
+    console.error("ERROR: SESSION_GATEWAY_TOKEN environment variable is required");
+    console.error("Generate a secure token with:");
+    console.error("  node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"");
+    process.exit(1);
+  }
+
+  const insecureDefaults = ["dev-token", "change-me", "test", "password", "secret"];
+  if (insecureDefaults.includes(token)) {
+    console.error("ERROR: SESSION_GATEWAY_TOKEN uses an insecure default value");
+    console.error("Please set a unique, random token");
+    console.error("Generate one with:");
+    console.error("  node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"");
+    process.exit(1);
+  }
+
+  if (token.length < 16) {
+    console.warn("WARNING: SESSION_GATEWAY_TOKEN is shorter than recommended (minimum 16 characters)");
+  }
+
+  return token;
 }

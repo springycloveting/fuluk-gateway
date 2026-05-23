@@ -15,6 +15,20 @@ const publicDir = path.resolve(__dirname, "..", "public");
 const SEND_FOLLOWUP_DELAY_MS = 5_000;
 const SEND_FOLLOWUP_LINES = 30;
 
+// Security headers for all responses
+const SECURITY_HEADERS = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "X-XSS-Protection": "1; mode=block",
+  "Referrer-Policy": "strict-origin-when-cross-origin",
+  "Permissions-Policy": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+};
+
+// Rate limiting configuration
+const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
+const RATE_LIMIT_MAX_REQUESTS = 100;
+const rateLimitStore = new Map();
+
 export function createSessionGatewayServer(options = {}) {
   const config = options.config ?? loadConfig();
   const store = options.store ?? new SessionStore(config.databasePath);
@@ -30,6 +44,13 @@ export async function handleSessionGatewayRequest(req, res, context) {
 
 async function handleRequest(req, res, context) {
   try {
+    // Apply rate limiting
+    const clientIp = getClientIp(req);
+    if (!checkRateLimit(clientIp)) {
+      sendJson(res, 429, { error: "Too many requests. Please try again later." });
+      return;
+    }
+
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
 
     if (url.pathname === "/health") {
@@ -58,6 +79,18 @@ async function handleRequest(req, res, context) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const config = loadConfig();
+
+  // Security warning for runtime mode
+  if (config.allowRuntimeMode) {
+    console.warn("");
+    console.warn("╔══════════════════════════════════════════════════════════════╗");
+    console.warn("║  WARNING: Runtime mode is ENABLED                            ║");
+    console.warn("║  Authenticated users can execute arbitrary shell commands!   ║");
+    console.warn("║  Set SESSION_GATEWAY_ALLOW_RUNTIME=false to disable.         ║");
+    console.warn("╚══════════════════════════════════════════════════════════════╝");
+    console.warn("");
+  }
+
   const server = createSessionGatewayServer({ config });
   server.listen(config.port, config.host, () => {
     console.log(`Session Gateway listening on http://${config.host}:${config.port}`);
@@ -98,14 +131,14 @@ async function handleApi(req, res, url, context) {
   }
 
   if (method === "GET" && pathname === "/api/config") {
-    sendJson(res, 200, { settings: config.runtimeSettings, enabled: config.runtimeSettingsEnabled });
+    sendJson(res, 200, { settings: maskSensitiveSettings(config.runtimeSettings), enabled: config.runtimeSettingsEnabled });
     return;
   }
 
   if (method === "PUT" && pathname === "/api/config") {
     const body = await readJsonBody(req);
     const settings = updateRuntimeSettings(config, body.settings ?? body);
-    sendJson(res, 200, { settings });
+    sendJson(res, 200, { settings: maskSensitiveSettings(settings) });
     return;
   }
 
@@ -421,6 +454,12 @@ function findExistingNamedSession(input, { store }) {
 
 function parseCreateInput(body, context) {
   if (!isSessionKind(body.kind)) throw new Error("kind must be codex, claude, opencode, or runtime");
+
+  // Check if runtime mode is allowed
+  if (body.kind === "runtime" && !context.config.allowRuntimeMode) {
+    throw new Error("Runtime mode is disabled on this server. Set SESSION_GATEWAY_ALLOW_RUNTIME=true to enable.");
+  }
+
   const deployment = parseCreateDeployment(body.kind, body, context);
 
   return {
@@ -471,19 +510,31 @@ async function serveStatic(res, pathname, context) {
   const publicDir = context.publicDir;
   const safePath = pathname === "/" ? "/index.html" : pathname;
   const filePath = path.resolve(publicDir, `.${safePath}`);
-  if (!filePath.startsWith(publicDir)) {
-    sendJson(res, 403, { error: "Forbidden" });
-    return;
-  }
 
   try {
-    const data = await fs.readFile(filePath);
+    // Resolve symlinks to prevent path traversal bypass
+    const [resolvedPublic, resolvedFile] = await Promise.all([
+      fs.realpath(publicDir),
+      fs.realpath(filePath).catch(() => null)
+    ]);
+
+    if (!resolvedFile || !resolvedFile.startsWith(resolvedPublic)) {
+      sendJson(res, 403, { error: "Forbidden" });
+      return;
+    }
+
+    const data = await fs.readFile(resolvedFile);
     const contentType = {
       ".html": "text/html; charset=utf-8",
       ".css": "text/css; charset=utf-8",
       ".js": "text/javascript; charset=utf-8"
-    }[path.extname(filePath)] ?? "application/octet-stream";
-    res.writeHead(200, { "cache-control": "no-store", "content-type": contentType });
+    }[path.extname(resolvedFile)] ?? "application/octet-stream";
+
+    res.writeHead(200, {
+      "cache-control": "no-store",
+      "content-type": contentType,
+      ...SECURITY_HEADERS
+    });
     res.end(data);
   } catch {
     sendJson(res, 404, { error: "Not found" });
@@ -491,13 +542,84 @@ async function serveStatic(res, pathname, context) {
 }
 
 function sendJson(res, status, payload) {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+  res.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+    ...SECURITY_HEADERS
+  });
   res.end(JSON.stringify(payload));
 }
 
 function sendText(res, status, text) {
-  res.writeHead(status, { "content-type": "text/plain; charset=utf-8" });
+  res.writeHead(status, {
+    "content-type": "text/plain; charset=utf-8",
+    "cache-control": "no-store",
+    ...SECURITY_HEADERS
+  });
   res.end(text);
+}
+
+// Rate limiting implementation
+function checkRateLimit(ip) {
+  const now = Date.now();
+  const windowStart = now - RATE_LIMIT_WINDOW_MS;
+
+  let requests = rateLimitStore.get(ip) || [];
+
+  // Filter out old requests
+  requests = requests.filter((t) => t > windowStart);
+
+  if (requests.length >= RATE_LIMIT_MAX_REQUESTS) {
+    return false;
+  }
+
+  requests.push(now);
+  rateLimitStore.set(ip, requests);
+
+  // Periodic cleanup of old entries
+  if (rateLimitStore.size > 10000) {
+    cleanupRateLimitStore(now);
+  }
+
+  return true;
+}
+
+function cleanupRateLimitStore(now) {
+  const windowStart = now - RATE_LIMIT_WINDOW_MS;
+  for (const [ip, requests] of rateLimitStore.entries()) {
+    const filtered = requests.filter((t) => t > windowStart);
+    if (filtered.length === 0) {
+      rateLimitStore.delete(ip);
+    } else {
+      rateLimitStore.set(ip, filtered);
+    }
+  }
+}
+
+function getClientIp(req) {
+  // Check X-Forwarded-For header (for reverse proxy setups)
+  const forwarded = req.headers["x-forwarded-for"];
+  if (forwarded) {
+    const ips = forwarded.split(",").map((ip) => ip.trim());
+    return ips[0] || req.socket?.remoteAddress || "unknown";
+  }
+  return req.socket?.remoteAddress || "unknown";
+}
+
+// Mask sensitive fields in settings before sending to client
+function maskSensitiveSettings(settings) {
+  if (!settings || typeof settings !== "object") return settings;
+
+  const masked = { ...settings };
+
+  if (masked.commandParser && typeof masked.commandParser === "object") {
+    masked.commandParser = {
+      ...masked.commandParser,
+      apiKey: masked.commandParser.apiKey ? "***" : ""
+    };
+  }
+
+  return masked;
 }
 
 function errorMessage(error) {

@@ -51,6 +51,7 @@ test("/api/nl output uses currentSessionId and returns JSON output", async () =>
   await handleSessionGatewayRequest(req, res, {
     config: {
       authToken: "secret",
+      allowRuntimeMode: true,
       runtimeSettings: {},
       runtimeSettingsEnabled: false
     },
@@ -129,6 +130,7 @@ test("/api/nl send can target a session by list position", async () => {
   await handleSessionGatewayRequest(req, res, {
     config: {
       authToken: "secret",
+      allowRuntimeMode: true,
       runtimeSettings: {},
       runtimeSettingsEnabled: false,
       sendFollowupDelayMs: 0
@@ -212,6 +214,7 @@ test("/api/nl send can target a named session through the submitting send path",
   await handleSessionGatewayRequest(req, res, {
     config: {
       authToken: "secret",
+      allowRuntimeMode: true,
       runtimeSettings: {},
       runtimeSettingsEnabled: false,
       sendFollowupDelayMs: 0
@@ -279,6 +282,7 @@ test("/api/nl send waits before returning 30 lines of current session output", a
   }, {
     config: {
       authToken: "secret",
+      allowRuntimeMode: true,
       runtimeSettings: {},
       runtimeSettingsEnabled: false
     },
@@ -341,6 +345,7 @@ test("/api/nl switch can target a session by list position", async () => {
   await handleSessionGatewayRequest(req, res, {
     config: {
       authToken: "secret",
+      allowRuntimeMode: true,
       runtimeSettings: {},
       runtimeSettingsEnabled: false
     },
@@ -423,10 +428,90 @@ test("/api/nl create applies non-docker text hints after command parsing", async
   assert.equal(records[0].cwd, parsed.session.cwd);
 });
 
+test("/api/sessions rejects runtime session when allowRuntimeMode is false", async () => {
+  const records = [];
+  const context = createCreateSessionContext({ records });
+  context.config.allowRuntimeMode = false;
+
+  const { statusCode, body } = await postJson("/api/sessions", {
+    kind: "runtime",
+    name: "local-shell"
+  }, context);
+
+  assert.equal(statusCode, 400);
+  const parsed = JSON.parse(body);
+  assert.match(parsed.error, /Runtime mode is disabled/);
+  assert.equal(records.length, 0);
+});
+
+test("/api/sessions allows runtime session when allowRuntimeMode is true", async () => {
+  const records = [];
+  const context = createCreateSessionContext({ cwdMode: "host", records });
+  context.config.allowRuntimeMode = true;
+
+  const { statusCode, body } = await postJson("/api/sessions", {
+    kind: "runtime",
+    name: "local-shell"
+  }, context);
+
+  assert.equal(statusCode, 201);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].kind, "runtime");
+});
+
+test("/api/config masks API key in response", async () => {
+  const context = createCreateSessionContext({ records: [] });
+  context.config.runtimeSettings = {
+    cliDeployment: {},
+    commandParser: {
+      enabled: true,
+      baseUrl: "http://localhost:8000",
+      model: "test-model",
+      apiKey: "super-secret-api-key"
+    }
+  };
+
+  const req = Readable.from([]);
+  req.method = "GET";
+  req.url = "/api/config";
+  req.headers = { host: "localhost", authorization: "Bearer secret" };
+
+  const res = {
+    statusCode: null,
+    headers: null,
+    body: "",
+    writeHead(statusCode, headers) {
+      this.statusCode = statusCode;
+      this.headers = headers;
+    },
+    end(body = "") {
+      this.body = String(body);
+    }
+  };
+
+  await handleSessionGatewayRequest(req, res, context);
+
+  assert.equal(res.statusCode, 200);
+  const parsed = JSON.parse(res.body);
+  assert.equal(parsed.settings.commandParser.apiKey, "***");
+});
+
+test("security headers are added to responses", async () => {
+  const context = createCreateSessionContext({ records: [] });
+  const { statusCode, headers } = await postJson("/api/sessions", { kind: "codex", name: "test" }, context);
+
+  assert.equal(statusCode, 201);
+  // HTTP headers are case-sensitive in JS objects, match exact casing from SECURITY_HEADERS
+  assert.equal(headers["X-Content-Type-Options"], "nosniff");
+  assert.equal(headers["X-Frame-Options"], "DENY");
+  assert.equal(headers["X-XSS-Protection"], "1; mode=block");
+});
+
 function createCreateSessionContext({ cwdMode, records }) {
   return {
     config: {
       authToken: "secret",
+      allowRuntimeMode: true,
       runtimeSettings: {},
       runtimeSettingsEnabled: false
     },
@@ -479,6 +564,7 @@ async function postJson(url, payload, context) {
     host: "localhost",
     authorization: "Bearer secret"
   };
+  req.socket = { remoteAddress: "127.0.0.1" };
   const res = {
     statusCode: null,
     headers: null,
