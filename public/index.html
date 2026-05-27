@@ -18,6 +18,7 @@
             <input id="all-yes" type="checkbox" />
             <span data-i18n="allYes">All Yes</span>
           </label>
+          <button id="open-history" class="ghost" type="button">历史</button>
           <button id="open-create" class="ghost" type="button">新建</button>
           <button id="open-run" class="ghost" type="button">命令</button>
           <button id="restart" class="ghost" type="button">重启</button>
@@ -152,6 +153,16 @@
             <button class="ghost" data-close-dialog="quick-key-dialog" type="button" data-i18n="cancel">取消</button>
             <button id="save-quick-key" type="submit" data-i18n="save">保存</button>
           </div>
+        </form>
+      </dialog>
+
+      <dialog id="history-dialog">
+        <form id="history-form" class="dialog-form history-dialog-form">
+          <div class="dialog-head">
+            <h2 data-i18n="historyTitle">输入历史</h2>
+            <button class="ghost" data-close-dialog="history-dialog" type="button" data-i18n="close">关闭</button>
+          </div>
+          <div id="history-list" class="history-list"></div>
         </form>
       </dialog>
     </main>

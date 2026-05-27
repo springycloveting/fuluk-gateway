@@ -139,6 +139,7 @@ export class SessionStore {
   }
 
   delete(id) {
+    this.db.prepare("delete from input_history where session_id = ?").run(id);
     this.db.prepare("delete from output_snapshots where session_id = ?").run(id);
     const result = this.db.prepare("delete from sessions where id = ?").run(id);
     return result.changes > 0;
@@ -146,6 +147,34 @@ export class SessionStore {
 
   close() {
     this.db.close();
+  }
+
+  saveInput(sessionId, text) {
+    const timestamp = nowIso();
+    this.db
+      .prepare("insert into input_history (session_id, text, created_at) values (?, ?, ?)")
+      .run(sessionId, text, timestamp);
+    return { sessionId, text, createdAt: timestamp };
+  }
+
+  listInputHistory(sessionId, limit = 100) {
+    return this.db
+      .prepare("select * from input_history where session_id = ? order by created_at desc limit ?")
+      .all(sessionId, limit)
+      .map(mapInputHistoryRow);
+  }
+
+  listAllInputHistory(limit = 200) {
+    return this.db
+      .prepare(`
+        select h.*, s.name as session_name, s.kind as session_kind
+        from input_history h
+        left join sessions s on h.session_id = s.id
+        order by h.created_at desc
+        limit ?
+      `)
+      .all(limit)
+      .map(mapInputHistoryRow);
   }
 
   migrate() {
@@ -173,8 +202,21 @@ export class SessionStore {
         text text not null
       );
 
+      create table if not exists input_history (
+        id integer primary key autoincrement,
+        session_id text not null references sessions(id) on delete cascade,
+        text text not null,
+        created_at text not null
+      );
+
       create index if not exists idx_output_snapshots_session_id_id
         on output_snapshots(session_id, id desc);
+
+      create index if not exists idx_input_history_session_id_created_at
+        on input_history(session_id, created_at desc);
+
+      create index if not exists idx_input_history_created_at
+        on input_history(created_at desc);
     `);
   }
 }
@@ -212,5 +254,16 @@ function mapSessionRow(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     stoppedAt: row.stopped_at
+  };
+}
+
+function mapInputHistoryRow(row) {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    sessionName: row.session_name ?? null,
+    sessionKind: row.session_kind ?? null,
+    text: row.text,
+    createdAt: row.created_at
   };
 }

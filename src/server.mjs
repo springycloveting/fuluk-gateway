@@ -130,6 +130,13 @@ async function handleApi(req, res, url, context) {
     return;
   }
 
+  if (method === "GET" && pathname === "/api/history") {
+    const limit = Math.min(500, Math.max(1, parseInt(url.searchParams.get("limit") || "200", 10) || 200));
+    const history = store.listAllInputHistory(limit);
+    sendJson(res, 200, { history });
+    return;
+  }
+
   if (method === "GET" && pathname === "/api/config") {
     sendJson(res, 200, { settings: config.runtimeSettings, enabled: config.runtimeSettingsEnabled });
     return;
@@ -172,10 +179,18 @@ async function handleSessionAction(req, res, url, method, idOrName, action, cont
     return;
   }
 
+  if (method === "GET" && action === "history") {
+    const limit = Math.min(500, Math.max(1, parseInt(url.searchParams.get("limit") || "100", 10) || 100));
+    const history = store.listInputHistory(session.id, limit);
+    sendJson(res, 200, { history });
+    return;
+  }
+
   if (method === "POST" && action === "input") {
     const body = await readJsonBody(req);
     if (typeof body.text !== "string" || !body.text.trim()) throw new Error("text is required");
     await tmux.send(session, body.text);
+    store.saveInput(session.id, body.text);
     store.touch(session.id);
     sendJson(res, 200, { ok: true });
     return;

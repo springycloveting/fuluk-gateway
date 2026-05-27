@@ -48,6 +48,8 @@ const translations = {
     createTitle: "新建会话",
     commandTitle: "命令",
     deleteTitle: "删除会话",
+    historyTitle: "输入历史",
+    history: "历史",
     deleteConfirm: "确认删除会话“{name}”？正在运行的会话会先停止。",
     commandParser: "命令解析",
     aiParserEnabled: "规则失败时使用本地模型",
@@ -95,6 +97,8 @@ const translations = {
     createTitle: "Create Session",
     commandTitle: "Command",
     deleteTitle: "Delete Session",
+    historyTitle: "Input History",
+    history: "History",
     deleteConfirm: "Delete session \"{name}\"? A running session will be stopped first.",
     commandParser: "Command Parser",
     aiParserEnabled: "Use local model when rules fail",
@@ -126,6 +130,9 @@ const els = {
   language: document.querySelector("#language"),
   theme: document.querySelector("#theme"),
   allYes: document.querySelector("#all-yes"),
+  openHistory: document.querySelector("#open-history"),
+  historyDialog: document.querySelector("#history-dialog"),
+  historyList: document.querySelector("#history-list"),
   openCreate: document.querySelector("#open-create"),
   createDialog: document.querySelector("#create-dialog"),
   createForm: document.querySelector("#create-form"),
@@ -205,6 +212,10 @@ els.closeSessions.addEventListener("click", closeSessionsPanel);
 els.openConfig.addEventListener("click", async () => {
   await loadConfig();
   els.configDialog.showModal();
+});
+els.openHistory.addEventListener("click", async () => {
+  await loadHistory();
+  els.historyDialog.showModal();
 });
 els.openCreate.addEventListener("click", () => {
   updateCreateDeploymentControls();
@@ -777,6 +788,41 @@ function closeSessionsPanel() {
 function closeDialog(dialogId) {
   const dialog = document.querySelector(`#${dialogId}`);
   if (dialog?.open) dialog.close();
+}
+
+async function loadHistory() {
+  try {
+    const data = await api("/api/history");
+    renderHistory(data.history ?? []);
+  } catch (error) {
+    els.historyList.textContent = `Error: ${error.message}`;
+  }
+}
+
+function renderHistory(history) {
+  if (!history.length) {
+    els.historyList.textContent = t("noHistory");
+    return;
+  }
+  els.historyList.innerHTML = history
+    .map(
+      (item) => `
+    <div class="history-item">
+      <div class="history-meta">
+        <span class="history-session">${escapeHtml(item.sessionName || item.sessionId)}</span>
+        <span class="history-kind">${escapeHtml(item.sessionKind || "")}</span>
+        <span class="history-time">${formatTime(item.createdAt)}</span>
+      </div>
+      <div class="history-text">${escapeHtml(item.text)}</div>
+    </div>
+  `
+    )
+    .join("");
+}
+
+function formatTime(isoString) {
+  const date = new Date(isoString);
+  return date.toLocaleString();
 }
 
 function focusSessionInput() {
