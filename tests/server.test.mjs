@@ -626,6 +626,131 @@ test("/api/sessions marks unchanged output older than one minute as stopped", as
   assert.deepEqual(saved.map((snapshot) => snapshot.sessionId), ["session-3"]);
 });
 
+test("/api/sessions notifies when a session changes from in progress to stopped", async () => {
+  const sessions = [
+    { id: "session-1", name: "idle", kind: "codex", status: "running", cwd: "/one", tmuxSessionName: "one" }
+  ];
+  let captureCount = 0;
+  const events = [];
+  const webhookRequests = [];
+  const context = {
+    config: {
+      authToken: "secret",
+      allowRuntimeMode: true,
+      runtimeSettings: {},
+      runtimeSettingsEnabled: false,
+      notificationWebhookUrl: "https://hooks.example/session"
+    },
+    store: {
+      list() {
+        return sessions;
+      },
+      updateStatus() {},
+      latestOutputSnapshot() {
+        return {
+          id: 1,
+          sessionId: "session-1",
+          capturedAt: new Date(Date.now() - (captureCount > 0 ? 61_000 : 1_000)).toISOString(),
+          lines: 80,
+          text: "same output"
+        };
+      },
+      saveOutput() {}
+    },
+    tmux: {
+      async exists() {
+        return true;
+      },
+      async capture() {
+        captureCount += 1;
+        return "same output";
+      }
+    },
+    eventHub: {
+      broadcast(event) {
+        events.push(event);
+      }
+    },
+    sessionTaskStates: new Map(),
+    async fetchImpl(url, options) {
+      webhookRequests.push({ url, body: JSON.parse(options.body) });
+      return { ok: true };
+    }
+  };
+
+  assert.equal((await getJson("/api/sessions", context)).statusCode, 200);
+  assert.equal((await getJson("/api/sessions", context)).statusCode, 200);
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, "session_task_state_changed");
+  assert.equal(events[0].previousTaskState, "in_progress");
+  assert.equal(events[0].taskState, "completed");
+  assert.equal(events[0].session.name, "idle");
+  assert.equal(webhookRequests.length, 1);
+  assert.equal(webhookRequests[0].url, "https://hooks.example/session");
+  assert.equal(webhookRequests[0].body.taskState, "completed");
+});
+
+test("/api/sessions notifies when a session changes from in progress to needs confirmation", async () => {
+  const sessions = [
+    { id: "session-1", name: "confirm", kind: "opencode", status: "running", cwd: "/one", tmuxSessionName: "one" }
+  ];
+  let captureCount = 0;
+  const events = [];
+  const context = {
+    config: {
+      authToken: "secret",
+      allowRuntimeMode: true,
+      runtimeSettings: { notifications: { webhookUrl: "https://hooks.example/settings" } },
+      runtimeSettingsEnabled: true
+    },
+    store: {
+      list() {
+        return sessions;
+      },
+      updateStatus() {},
+      latestOutputSnapshot() {
+        return {
+          id: 1,
+          sessionId: "session-1",
+          capturedAt: new Date().toISOString(),
+          lines: 80,
+          text: captureCount > 0 ? "waiting" : "working"
+        };
+      },
+      saveOutput(sessionId, lines, text) {
+        return { id: 2, sessionId, capturedAt: new Date().toISOString(), lines, text };
+      }
+    },
+    tmux: {
+      async exists() {
+        return true;
+      },
+      async capture() {
+        captureCount += 1;
+        return captureCount > 1 ? "Allow once   Allow always   Reject" : "working";
+      }
+    },
+    eventHub: {
+      broadcast(event) {
+        events.push(event);
+      }
+    },
+    sessionTaskStates: new Map(),
+    async fetchImpl() {
+      return { ok: true };
+    }
+  };
+
+  assert.equal((await getJson("/api/sessions", context)).statusCode, 200);
+  assert.equal((await getJson("/api/sessions", context)).statusCode, 200);
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].previousTaskState, "in_progress");
+  assert.equal(events[0].taskState, "needs_confirmation");
+  assert.equal(events[0].session.name, "confirm");
+});
+
 test("/api/nl switch can target a session by list position", async () => {
   const sessions = [
     { id: "session-1", name: "first", kind: "codex", status: "running", cwd: "/one", tmuxSessionName: "session-1" },

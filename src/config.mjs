@@ -24,6 +24,7 @@ export function loadConfig() {
     settingsPath,
     runtimeSettingsEnabled: fs.existsSync(settingsPath),
     runtimeSettings: loadRuntimeSettings(settingsPath),
+    notificationWebhookUrl: process.env.SESSION_GATEWAY_WEBHOOK_URL ?? "",
     databasePath:
       process.env.SESSION_GATEWAY_DB ??
       path.resolve(process.cwd(), "data", "session-gateway.sqlite"),
@@ -31,6 +32,7 @@ export function loadConfig() {
       process.env.SESSION_GATEWAY_CODECLIP_SESSIONS_DIR ??
       "/home/v6/work/CodeClip/data/sessions",
     defaultRuntimeCommand: process.env.SESSION_GATEWAY_RUNTIME ?? "/bin/bash",
+    notificationPollMs: parsePositiveInt(process.env.SESSION_GATEWAY_NOTIFICATION_POLL_MS, 5_000),
     submitKeyDelayMs: parsePositiveInt(process.env.SESSION_GATEWAY_SUBMIT_KEY_DELAY_MS, 80),
     submitKeys: {
       codex: process.env.SESSION_GATEWAY_CODEX_SUBMIT_KEY ?? "Enter",
@@ -74,7 +76,18 @@ export function normalizeRuntimeSettings(input = {}) {
     cliDeployment[kind] = { mode, dockerName };
   }
 
-  return { cliDeployment, commandParser: normalizeCommandParser(input.commandParser) };
+  return {
+    cliDeployment,
+    commandParser: normalizeCommandParser(input.commandParser),
+    notifications: normalizeNotifications(input.notifications)
+  };
+}
+
+function normalizeNotifications(input = {}) {
+  const current = input && typeof input === "object" ? input : {};
+  return {
+    webhookUrl: typeof current.webhookUrl === "string" ? current.webhookUrl.trim() : ""
+  };
 }
 
 function normalizeCommandParser(input = {}) {

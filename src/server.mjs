@@ -1,4 +1,5 @@
 import http from "node:http";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,10 +40,35 @@ export function createSessionGatewayServer(options = {}) {
   const sessionRecorder =
     options.sessionRecorder ?? new CodeClipSessionRecorder({ sessionsDir: config.codeClipSessionsDir });
   const staticDir = options.publicDir ?? publicDir;
-
-  return http.createServer((req, res) =>
-    handleRequest(req, res, { config, store, tmux, sessionRecorder, publicDir: staticDir })
-  );
+  const eventHub = options.eventHub ?? new SessionEventHub();
+  const sessionTaskStates = options.sessionTaskStates ?? new Map();
+  const context = { config, store, tmux, sessionRecorder, publicDir: staticDir, eventHub, sessionTaskStates };
+  let notificationPollTimer = null;
+  const pollNotifications = async () => {
+    try {
+      await listSessionsWithTaskState(context);
+    } catch (error) {
+      console.warn(`Session task notification poll failed: ${errorMessage(error)}`);
+    }
+  };
+  const scheduleNotificationPoll = () => {
+    clearTimeout(notificationPollTimer);
+    const hasWebhook = Boolean(config.notificationWebhookUrl || config.runtimeSettings?.notifications?.webhookUrl);
+    const hasWebSocketClients = typeof eventHub.hasClients === "function" && eventHub.hasClients();
+    if (!hasWebhook && !hasWebSocketClients) return;
+    if (config.notificationPollMs <= 0) return;
+    notificationPollTimer = setTimeout(async () => {
+      await pollNotifications();
+      scheduleNotificationPoll();
+    }, config.notificationPollMs);
+    notificationPollTimer.unref?.();
+  };
+  eventHub.onClientChange = scheduleNotificationPoll;
+  const server = http.createServer((req, res) => handleRequest(req, res, context));
+  server.on("upgrade", (req, socket, head) => handleWebSocketUpgrade(req, socket, head, context));
+  server.on("listening", scheduleNotificationPoll);
+  server.on("close", () => clearTimeout(notificationPollTimer));
+  return server;
 }
 
 export async function handleSessionGatewayRequest(req, res, context) {
@@ -583,7 +609,9 @@ async function refreshStatuses(sessions, { store, tmux }) {
 
 async function listSessionsWithTaskState(context) {
   const sessions = await refreshStatuses(context.store.list(), context);
-  return annotateSessionsTaskState(sessions, context);
+  const annotated = await annotateSessionsTaskState(sessions, context);
+  await dispatchSessionTaskTransitions(annotated, context);
+  return annotated;
 }
 
 async function annotateSessionsTaskState(sessions, { store, tmux }) {
@@ -619,6 +647,46 @@ function isOutputIdle(snapshot) {
   const capturedAt = Date.parse(snapshot.capturedAt);
   if (!Number.isFinite(capturedAt)) return false;
   return Date.now() - capturedAt >= IDLE_OUTPUT_STOPPED_MS;
+}
+
+async function dispatchSessionTaskTransitions(sessions, context) {
+  if (!context.sessionTaskStates) context.sessionTaskStates = new Map();
+  const notifications = [];
+  for (const session of sessions) {
+    const previousTaskState = context.sessionTaskStates.get(session.id);
+    context.sessionTaskStates.set(session.id, session.taskState);
+    if (!shouldNotifyTaskTransition(previousTaskState, session.taskState)) continue;
+    notifications.push({
+      type: "session_task_state_changed",
+      session,
+      previousTaskState,
+      taskState: session.taskState,
+      changedAt: new Date().toISOString()
+    });
+  }
+
+  for (const event of notifications) {
+    context.eventHub?.broadcast(event);
+    await sendSessionWebhook(event, context);
+  }
+}
+
+function shouldNotifyTaskTransition(previousTaskState, taskState) {
+  return previousTaskState === "in_progress" && (taskState === "completed" || taskState === "needs_confirmation");
+}
+
+async function sendSessionWebhook(event, { config, fetchImpl = fetch }) {
+  const webhookUrl = config.notificationWebhookUrl || config.runtimeSettings?.notifications?.webhookUrl;
+  if (!webhookUrl) return;
+  try {
+    await fetchImpl(webhookUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(event)
+    });
+  } catch (error) {
+    console.warn(`Session task webhook failed: ${errorMessage(error)}`);
+  }
 }
 
 function hasConfirmationPrompt(text) {
@@ -702,6 +770,100 @@ function requireSession(idOrName, { store }) {
 
 function isAuthorized(req, { config }) {
   return isAuthorizedHeader(req.headers.authorization, config.authToken);
+}
+
+function isAuthorizedWebSocket(url, req, { config }) {
+  const token = url.searchParams.get("token");
+  return token === config.authToken || isAuthorized(req, { config });
+}
+
+function handleWebSocketUpgrade(req, socket, head, context) {
+  try {
+    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    if (url.pathname !== "/api/session-events") {
+      socket.destroy();
+      return;
+    }
+    if (!isAuthorizedWebSocket(url, req, context)) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    const key = req.headers["sec-websocket-key"];
+    if (req.headers.upgrade?.toLowerCase() !== "websocket" || typeof key !== "string") {
+      socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    const accept = crypto
+      .createHash("sha1")
+      .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+      .digest("base64");
+    socket.write(
+      [
+        "HTTP/1.1 101 Switching Protocols",
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        `Sec-WebSocket-Accept: ${accept}`,
+        "\r\n"
+      ].join("\r\n")
+    );
+    context.eventHub?.add(socket);
+    if (head?.length) socket.unshift(head);
+  } catch {
+    socket.destroy();
+  }
+}
+
+class SessionEventHub {
+  constructor() {
+    this.clients = new Set();
+  }
+
+  add(socket) {
+    this.clients.add(socket);
+    socket.on("close", () => {
+      this.clients.delete(socket);
+      this.onClientChange?.();
+    });
+    socket.on("error", () => {
+      this.clients.delete(socket);
+      this.onClientChange?.();
+    });
+    this.onClientChange?.();
+  }
+
+  hasClients() {
+    return this.clients.size > 0;
+  }
+
+  broadcast(event) {
+    const frame = encodeWebSocketTextFrame(JSON.stringify(event));
+    for (const socket of this.clients) {
+      if (socket.destroyed || socket.writableEnded) {
+        this.clients.delete(socket);
+        continue;
+      }
+      socket.write(frame);
+    }
+  }
+}
+
+function encodeWebSocketTextFrame(text) {
+  const payload = Buffer.from(text, "utf8");
+  if (payload.length < 126) return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
+  if (payload.length <= 0xffff) {
+    const header = Buffer.alloc(4);
+    header[0] = 0x81;
+    header[1] = 126;
+    header.writeUInt16BE(payload.length, 2);
+    return Buffer.concat([header, payload]);
+  }
+  const header = Buffer.alloc(10);
+  header[0] = 0x81;
+  header[1] = 127;
+  header.writeBigUInt64BE(BigInt(payload.length), 2);
+  return Buffer.concat([header, payload]);
 }
 
 async function serveStatic(res, pathname, context) {

@@ -12,6 +12,7 @@ const state = {
   allYesEnabled: localStorage.getItem("sessionGatewayAllYes") === "1",
   autoYesSignatures: new Map(),
   cliDeploymentDefaults: {},
+  notifications: {},
   pendingDeleteSession: null,
   customQuickKeys: loadCustomQuickKeys(),
   language: localStorage.getItem("sessionGatewayLanguage") || "zh",
@@ -371,6 +372,7 @@ async function saveConfig() {
 
     const settings = {
       cliDeployment: state.cliDeploymentDefaults,
+      notifications: state.notifications,
       commandParser
     };
     const data = await api("/api/config", {
@@ -933,6 +935,7 @@ function focusSessionInput() {
 
 function applyServerSettings(settings) {
   state.cliDeploymentDefaults = settings?.cliDeployment ?? {};
+  state.notifications = settings?.notifications ?? {};
   const commandParser = settings?.commandParser ?? {};
 
   const savedConfig = localStorage.getItem("sessionGatewayAiParser");

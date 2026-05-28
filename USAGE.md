@@ -97,6 +97,55 @@ web-ai-agent-pi-server
 - `WEB_AI_AGENT_PI_PORT` - web-ai-agent-pi 服务端口（默认 8786）
 - `WEB_AI_AGENT_PI_TOKEN` - 认证 token
 
+## 会话状态通知
+
+Session Gateway 会在会话任务状态发生指定变化时发送通知：
+
+- `in_progress` -> `completed`（界面显示“已停止”）
+- `in_progress` -> `needs_confirmation`（界面显示“需要确认”）
+
+事件 JSON：
+
+```json
+{
+  "type": "session_task_state_changed",
+  "previousTaskState": "in_progress",
+  "taskState": "needs_confirmation",
+  "changedAt": "2026-05-28T00:00:00.000Z",
+  "session": { "id": "...", "name": "test2" }
+}
+```
+
+### WebSocket
+
+连接地址：
+
+```text
+ws://127.0.0.1:8787/api/session-events?token=SESSION_GATEWAY_TOKEN
+```
+
+服务端会在有 WebSocket 客户端连接时按 `SESSION_GATEWAY_NOTIFICATION_POLL_MS` 轮询会话状态，默认 `5000` 毫秒。
+
+### Webhook
+
+环境变量：
+
+```bash
+SESSION_GATEWAY_WEBHOOK_URL=https://example.com/session-webhook
+```
+
+也可以写入 `data/session-gateway-settings.json`：
+
+```json
+{
+  "notifications": {
+    "webhookUrl": "https://example.com/session-webhook"
+  }
+}
+```
+
+有 Webhook 配置时，服务端会自动轮询并向该 URL `POST` 事件 JSON。
+
 ## Web 界面使用
 
 ### 1. 访问界面
