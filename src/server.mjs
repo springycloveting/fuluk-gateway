@@ -8,6 +8,7 @@ import { loadConfig, updateRuntimeSettings } from "./config.mjs";
 import { CodeClipSessionRecorder } from "./codeclip_recorder.mjs";
 import { isAuthorizedHeader } from "./auth.mjs";
 import { parseNaturalCommand } from "./nl.mjs";
+import { createSessionAgentManager } from "./session_agent.mjs";
 import { SessionStore } from "./store.mjs";
 import { TmuxBackend } from "./tmux.mjs";
 import { newId, normalizeLines, outputEtag, readJsonBody, sanitizeTmuxName } from "./utils.mjs";
@@ -43,6 +44,8 @@ export function createSessionGatewayServer(options = {}) {
   const eventHub = options.eventHub ?? new SessionEventHub();
   const sessionTaskStates = options.sessionTaskStates ?? new Map();
   const context = { config, store, tmux, sessionRecorder, publicDir: staticDir, eventHub, sessionTaskStates };
+  context.sessionAgentManager =
+    options.sessionAgentManager ?? createSessionAgentManager(context, createSessionAgentOperations(context));
   let notificationPollTimer = null;
   const pollNotifications = async () => {
     try {
@@ -110,26 +113,6 @@ async function handleRequest(req, res, context) {
   }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const config = loadConfig();
-
-  // Security warning for runtime mode
-  if (config.allowRuntimeMode) {
-    console.warn("");
-    console.warn("╔══════════════════════════════════════════════════════════════╗");
-    console.warn("║  WARNING: Runtime mode is ENABLED                            ║");
-    console.warn("║  Authenticated users can execute arbitrary shell commands!   ║");
-    console.warn("║  Set SESSION_GATEWAY_ALLOW_RUNTIME=false to disable.         ║");
-    console.warn("╚══════════════════════════════════════════════════════════════╝");
-    console.warn("");
-  }
-
-  const server = createSessionGatewayServer({ config });
-  server.listen(config.port, config.host, () => {
-    console.log(`Session Gateway listening on http://${config.host}:${config.port}`);
-  });
-}
-
 async function handleHealth(res, { tmux }) {
   try {
     await tmux.ensureAvailable();
@@ -177,7 +160,8 @@ async function handleApi(req, res, url, context) {
 
   if (method === "PUT" && pathname === "/api/config") {
     const body = await readJsonBody(req);
-    const settings = updateRuntimeSettings(config, body.settings ?? body);
+    const settings = updateRuntimeSettings(config, { ...config.runtimeSettings, ...(body.settings ?? body) });
+    context.sessionAgentManager?.reset?.();
     sendJson(res, 200, { settings });
     return;
   }
@@ -284,6 +268,11 @@ function isAllowedTmuxKey(key) {
 async function handleNaturalLanguage(req, res, context) {
   const body = await readJsonBody(req);
   if (typeof body.text !== "string") throw new Error("text is required");
+  if (context.sessionAgentManager?.run) {
+    const result = await context.sessionAgentManager.run(body.text, { currentSessionId: body.currentSessionId });
+    sendJson(res, 200, result);
+    return;
+  }
   const { store, tmux } = context;
 
   const command = await parseCommand(body.text, context);
@@ -347,6 +336,119 @@ async function handleNaturalLanguage(req, res, context) {
     store.markRunning(session.id);
     sendJson(res, 200, { command, session: store.findByIdOrName(session.id) });
   }
+}
+
+function createSessionAgentOperations(context) {
+  let currentRequest = {};
+  const withCurrentRequest = (params = {}) => ({ ...currentRequest, ...params });
+  const isSummaryRequest = () => /总结|摘要|概括|归纳|summary|summari[sz]e|recap/i.test(String(currentRequest.text ?? ""));
+  return {
+    setCurrentRequest(request = {}) {
+      currentRequest = request;
+    },
+    async list_sessions(params = {}) {
+      const sessions = (await listSessionsWithTaskState(context)).filter(
+        (session) => !params.runningOnly || session.status === "running"
+      );
+      if (!params.includeOutputLines) return { sessions };
+      const lines = normalizeLines(params.includeOutputLines);
+      const enriched = [];
+      for (const session of sessions) {
+        let output = "";
+        if (session.status === "running") {
+          try {
+            output = await context.tmux.capture(session, lines);
+            context.store.saveOutput(session.id, lines, output);
+          } catch {
+            output = "";
+          }
+        }
+        enriched.push({ ...session, output });
+      }
+      return { sessions: enriched };
+    },
+    async get_session_output(params = {}) {
+      const command = {
+        type: "output",
+        target: params.target ?? null,
+        targetIndex: params.targetIndex,
+        lines: params.lines ?? (isSummaryRequest() ? 50 : 50)
+      };
+      const session = requireCommandSession(command, withCurrentRequest(params), context);
+      const output = await context.tmux.capture(session, command.lines);
+      context.store.saveOutput(session.id, command.lines, output);
+      return { session, output };
+    },
+    async send_to_session(params = {}) {
+      const command = { type: "send", target: params.target ?? null, targetIndex: params.targetIndex, text: params.text };
+      if (typeof command.text !== "string" || !command.text.trim()) throw new Error("text is required");
+      const session = requireCommandSession(command, withCurrentRequest(params), context);
+      await recordFinalAnswerBeforeInput(session, command.text, context);
+      await context.tmux.send(session, command.text);
+      saveInputIfSupported(context.store, session.id, command.text);
+      context.store.touch(session.id);
+      const output = await captureAfterSend(session, context);
+      return { ok: true, session, output };
+    },
+    async send_keys_to_session(params = {}) {
+      const command = { type: "keys", target: params.target ?? null, targetIndex: params.targetIndex };
+      const session = requireCommandSession(command, withCurrentRequest(params), context);
+      const keys = parseTmuxKeys(params.keys);
+      await context.tmux.sendKeys(session, keys);
+      context.store.touch(session.id);
+      return { ok: true, session, keys };
+    },
+    async switch_session(params = {}) {
+      const command = { type: "switch", target: params.target ?? null, targetIndex: params.targetIndex };
+      const session = requireCommandSession(command, withCurrentRequest(params), context);
+      const output = await context.tmux.capture(session, 120);
+      context.store.saveOutput(session.id, 120, output);
+      return { session, output };
+    },
+    async stop_session(params = {}) {
+      const command = { type: "stop", target: params.target ?? null, targetIndex: params.targetIndex };
+      const session = requireCommandSession(command, withCurrentRequest(params), context);
+      await context.tmux.stop(session);
+      context.store.updateStatus(session.id, "stopped");
+      return { ok: true, session: context.store.findByIdOrName(session.id) ?? { ...session, status: "stopped" } };
+    },
+    async restart_session(params = {}) {
+      const command = { type: "restart", target: params.target ?? null, targetIndex: params.targetIndex };
+      const session = requireCommandSession(command, withCurrentRequest(params), context);
+      await context.tmux.restart(session);
+      context.store.markRunning(session.id);
+      return { session: context.store.findByIdOrName(session.id) };
+    },
+    async create_session(params = {}) {
+      if (!isSessionKind(params.kind)) throw new Error("kind must be codex, claude, opencode, pi-os, or runtime");
+      if (params.kind === "runtime" && !context.config.allowRuntimeMode) {
+        throw new Error("Runtime mode is disabled on this server. Set SESSION_GATEWAY_ALLOW_RUNTIME=true to enable.");
+      }
+      const deployment =
+        params.kind === "runtime" || !params.deployment?.mode
+          ? null
+          : parseCreateDeployment(params.kind, { deployment: params.deployment }, context);
+      const session = await createSession({
+        kind: params.kind,
+        cwd: typeof params.cwd === "string" && params.cwd.trim() ? params.cwd.trim() : undefined,
+        name: typeof params.name === "string" ? params.name : undefined,
+        project: typeof params.project === "string" ? params.project : null,
+        deployment,
+        commandArgs: []
+      }, context);
+      return { session };
+    },
+    async summarize_session_states() {
+      const sessions = await listSessionsWithTaskState(context);
+      const groups = sessions.reduce((acc, session) => {
+        const key = session.taskState ?? session.status;
+        acc[key] = acc[key] ?? [];
+        acc[key].push(session.name);
+        return acc;
+      }, {});
+      return JSON.stringify({ groups, sessions }, null, 2);
+    }
+  };
 }
 
 async function captureAfterSend(session, { config, store, tmux }) {
@@ -719,7 +821,7 @@ function findExistingNamedSession(input, { store }) {
 }
 
 function parseCreateInput(body, context) {
-  if (!isSessionKind(body.kind)) throw new Error("kind must be codex, claude, opencode, or runtime");
+  if (!isSessionKind(body.kind)) throw new Error("kind must be codex, claude, opencode, pi-os, or runtime");
 
   // Check if runtime mode is allowed
   if (body.kind === "runtime" && !context.config.allowRuntimeMode) {
@@ -759,7 +861,7 @@ function parseCreateDeployment(kind, body, { config }) {
 }
 
 function isSessionKind(value) {
-  return value === "codex" || value === "claude" || value === "opencode" || value === "runtime";
+  return value === "codex" || value === "claude" || value === "opencode" || value === "pi-os" || value === "runtime";
 }
 
 function requireSession(idOrName, { store }) {
@@ -968,4 +1070,24 @@ function getClientIp(req) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const config = loadConfig();
+
+  // Security warning for runtime mode
+  if (config.allowRuntimeMode) {
+    console.warn("");
+    console.warn("╔══════════════════════════════════════════════════════════════╗");
+    console.warn("║  WARNING: Runtime mode is ENABLED                            ║");
+    console.warn("║  Authenticated users can execute arbitrary shell commands!   ║");
+    console.warn("║  Set SESSION_GATEWAY_ALLOW_RUNTIME=false to disable.         ║");
+    console.warn("╚══════════════════════════════════════════════════════════════╝");
+    console.warn("");
+  }
+
+  const server = createSessionGatewayServer({ config });
+  server.listen(config.port, config.host, () => {
+    console.log(`Session Gateway listening on http://${config.host}:${config.port}`);
+  });
 }

@@ -21,7 +21,7 @@
           </label>
           <button id="open-history" class="ghost" type="button">历史</button>
           <button id="open-create" class="ghost" type="button">新建</button>
-          <button id="open-run" class="ghost" type="button">命令</button>
+          <button id="open-run" class="ghost" type="button">助手</button>
           <button id="restart" class="ghost" type="button">重启</button>
           <button id="stop" class="ghost" type="button">停止</button>
           <button id="open-config" class="ghost" type="button">配置</button>
@@ -117,17 +117,20 @@
         </form>
       </dialog>
 
-      <dialog id="run-dialog">
-        <form id="run-form" class="dialog-form">
-          <div class="dialog-head">
-            <h2 data-i18n="commandTitle">命令</h2>
-            <button class="ghost" data-close-dialog="run-dialog" type="button" data-i18n="close">关闭</button>
+      <section id="run-dialog" class="assistant-panel" aria-hidden="true">
+        <div class="dialog-head">
+          <div>
+            <h2 data-i18n="commandTitle">助手</h2>
+            <p class="assistant-subtitle">web-pi</p>
           </div>
-          <input id="nl" placeholder="新建一个 codex 会话 codex-app，目录 /workspace/app。" />
-          <button id="run-nl" type="submit">命令</button>
-          <pre id="command-result" class="command-result"></pre>
+          <button id="close-run" class="ghost" type="button" data-i18n="close">关闭</button>
+        </div>
+        <div id="assistant-messages" class="assistant-messages" aria-live="polite"></div>
+        <form id="run-form" class="assistant-form">
+          <input id="nl" placeholder="查看并总结当前会话。" />
+          <button id="run-nl" type="submit">发送</button>
         </form>
-      </dialog>
+      </section>
 
       <dialog id="delete-dialog">
         <form id="delete-form" class="dialog-form">

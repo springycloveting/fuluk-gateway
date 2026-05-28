@@ -79,8 +79,87 @@ export function normalizeRuntimeSettings(input = {}) {
   return {
     cliDeployment,
     commandParser: normalizeCommandParser(input.commandParser),
-    notifications: normalizeNotifications(input.notifications)
+    notifications: normalizeNotifications(input.notifications),
+    sessionAgent: normalizeSessionAgent(input.sessionAgent)
   };
+}
+
+function normalizeSessionAgent(input = {}) {
+  const current = input && typeof input === "object" ? input : {};
+  return {
+    model: typeof current.model === "string" ? current.model.trim() : "",
+    apiKey: typeof current.apiKey === "string" ? current.apiKey.trim() : "",
+    models: normalizeSessionAgentModels(current.models),
+    resetOnConfigChange: Boolean(current.resetOnConfigChange)
+  };
+}
+
+function normalizeSessionAgentModels(input = {}) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const providers = {};
+  for (const [provider, providerValue] of Object.entries(input)) {
+    if (provider === "defaultModel" || provider === "default_model") continue;
+    if (!providerValue || typeof providerValue !== "object" || Array.isArray(providerValue)) continue;
+    const models = {};
+    for (const [modelId, modelValue] of Object.entries(providerValue)) {
+      const normalized = normalizeSessionAgentModel(provider, modelId, modelValue);
+      if (normalized) models[modelId] = normalized;
+    }
+    providers[provider] = models;
+  }
+  return providers;
+}
+
+function normalizeSessionAgentModel(provider, modelId, input = {}) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const api = typeof input.api === "string" ? input.api.trim() : "";
+  const baseUrl =
+    typeof input.baseUrl === "string"
+      ? input.baseUrl.trim().replace(/\/+$/, "")
+      : typeof input.base_url === "string"
+        ? input.base_url.trim().replace(/\/+$/, "")
+        : "";
+  if (!api || !baseUrl) return null;
+  const contextWindow = positiveNumber(input.contextWindow ?? input.context_window, 128000);
+  const maxTokens = positiveNumber(input.maxTokens ?? input.max_tokens, 4096);
+  const headers = normalizeStringMap(input.headers);
+  return {
+    id: typeof input.id === "string" && input.id.trim() ? input.id.trim() : modelId,
+    name: typeof input.name === "string" && input.name.trim() ? input.name.trim() : modelId,
+    api,
+    provider: typeof input.provider === "string" && input.provider.trim() ? input.provider.trim() : provider,
+    baseUrl,
+    reasoning: Boolean(input.reasoning),
+    input: normalizeModelInput(input.input),
+    contextWindow,
+    maxTokens,
+    headers,
+    apiKey:
+      typeof input.apiKey === "string"
+        ? input.apiKey.trim()
+        : typeof input.api_key === "string"
+          ? input.api_key.trim()
+          : ""
+  };
+}
+
+function normalizeStringMap(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const output = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (typeof value === "string") output[key] = value;
+  }
+  return output;
+}
+
+function normalizeModelInput(input) {
+  if (!Array.isArray(input)) return ["text"];
+  const values = input.filter((value) => value === "text" || value === "image");
+  return values.length ? values : ["text"];
+}
+
+function positiveNumber(value, fallback) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 function normalizeNotifications(input = {}) {

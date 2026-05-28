@@ -963,6 +963,56 @@ test("security headers are added to responses", async () => {
   assert.equal(headers["X-XSS-Protection"], "1; mode=block");
 });
 
+test("/api/config preserves existing notifications and sessionAgent when saving partial settings", async () => {
+  const writes = [];
+  const context = createCreateSessionContext({ records: [] });
+  context.config.settingsPath = "/tmp/session-gateway-test-settings.json";
+  context.config.runtimeSettingsEnabled = true;
+  context.config.runtimeSettings = {
+    cliDeployment: {
+      codex: { mode: "docker", dockerName: "worker-codex" },
+      claude: { mode: "docker", dockerName: "worker-claude" },
+      opencode: { mode: "docker", dockerName: "worker-opencode" },
+      "pi-os": { mode: "host", dockerName: "" }
+    },
+    commandParser: { enabled: false, mode: "rules-only" },
+    notifications: { webhookUrl: "https://hooks.example/settings" },
+    sessionAgent: {
+      model: "openai:gpt-5.2",
+      apiKey: "agent-key",
+      models: {
+        local: {
+          qwen: {
+            api: "openai-completions",
+            baseUrl: "http://127.0.0.1:11434/v1",
+            contextWindow: 128000,
+            maxTokens: 4096
+          }
+        }
+      }
+    }
+  };
+  context.sessionAgentManager = {
+    reset() {
+      writes.push("reset");
+    }
+  };
+
+  const { statusCode, body } = await putJson("/api/config", {
+    settings: {
+      commandParser: { enabled: false, mode: "rules-only" }
+    }
+  }, context);
+
+  assert.equal(statusCode, 200);
+  const settings = JSON.parse(body).settings;
+  assert.equal(settings.notifications.webhookUrl, "https://hooks.example/settings");
+  assert.equal(settings.sessionAgent.model, "openai:gpt-5.2");
+  assert.equal(settings.sessionAgent.apiKey, "agent-key");
+  assert.equal(settings.sessionAgent.models.local.qwen.baseUrl, "http://127.0.0.1:11434/v1");
+  assert.deepEqual(writes, ["reset"]);
+});
+
 function createCreateSessionContext({ cwdMode, records }) {
   return {
     config: {
@@ -1013,8 +1063,16 @@ function createCreateSessionContext({ cwdMode, records }) {
 }
 
 async function postJson(url, payload, context) {
+  return requestJson("POST", url, payload, context);
+}
+
+async function putJson(url, payload, context) {
+  return requestJson("PUT", url, payload, context);
+}
+
+async function requestJson(method, url, payload, context) {
   const req = Readable.from([JSON.stringify(payload)]);
-  req.method = "POST";
+  req.method = method;
   req.url = url;
   req.headers = {
     host: "localhost",

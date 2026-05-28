@@ -14,6 +14,7 @@ const state = {
   cliDeploymentDefaults: {},
   notifications: {},
   pendingDeleteSession: null,
+  assistantMessages: [],
   customQuickKeys: loadCustomQuickKeys(),
   language: localStorage.getItem("sessionGatewayLanguage") || "zh",
   theme: localStorage.getItem("sessionGatewayTheme") || "dark"
@@ -25,7 +26,7 @@ const translations = {
   zh: {
     sessions: "会话",
     create: "新建",
-    command: "命令",
+    command: "助手",
     restart: "重启",
     stop: "停止",
     config: "配置",
@@ -49,10 +50,13 @@ const translations = {
     configTitle: "配置",
     sessionsTitle: "会话",
     createTitle: "新建会话",
-    commandTitle: "命令",
+    commandTitle: "助手",
     deleteTitle: "删除会话",
     historyTitle: "输入历史",
     history: "历史",
+    assistantEmpty: "和 web-pi 对话。它会通过工具管理会话，并把结果整理成回复。",
+    assistantUser: "你",
+    assistantError: "错误",
     deleteConfirm: "确认删除会话“{name}”？正在运行的会话会先停止。",
     commandParser: "命令解析",
     aiParserEnabled: "规则失败时使用本地模型",
@@ -73,12 +77,12 @@ const translations = {
     namePlaceholder: "会话名，例如 codex-app",
     cwdPlaceholder: "工作目录，留空则使用默认会话目录",
     projectPlaceholder: "项目名",
-    nlPlaceholder: "帮助 / 发送 查看当前项目结构 / 新建 codex 会话 app，目录 /workspace/app"
+    nlPlaceholder: "问 web-pi，例如：查看并总结当前会话。"
   },
   en: {
     sessions: "Sessions",
     create: "Create",
-    command: "Command",
+    command: "Assistant",
     restart: "Restart",
     stop: "Stop",
     config: "Config",
@@ -102,10 +106,13 @@ const translations = {
     configTitle: "Config",
     sessionsTitle: "Sessions",
     createTitle: "Create Session",
-    commandTitle: "Command",
+    commandTitle: "Assistant",
     deleteTitle: "Delete Session",
     historyTitle: "Input History",
     history: "History",
+    assistantEmpty: "Chat with web-pi. It manages sessions through tools and summarizes the result here.",
+    assistantUser: "You",
+    assistantError: "Error",
     deleteConfirm: "Delete session \"{name}\"? A running session will be stopped first.",
     commandParser: "Command Parser",
     aiParserEnabled: "Use local model when rules fail",
@@ -126,7 +133,7 @@ const translations = {
     namePlaceholder: "Session name, e.g. codex-app",
     cwdPlaceholder: "Working directory; leave blank for the default session folder",
     projectPlaceholder: "Project",
-    nlPlaceholder: "help / send inspect this repo / create codex session app in /workspace/app"
+    nlPlaceholder: "Ask web-pi, e.g. summarize the current session."
   }
 };
 
@@ -151,6 +158,7 @@ const els = {
   openRun: document.querySelector("#open-run"),
   runDialog: document.querySelector("#run-dialog"),
   runForm: document.querySelector("#run-form"),
+  closeRun: document.querySelector("#close-run"),
   deleteDialog: document.querySelector("#delete-dialog"),
   deleteForm: document.querySelector("#delete-form"),
   deleteMessage: document.querySelector("#delete-message"),
@@ -175,6 +183,7 @@ const els = {
   create: document.querySelector("#create"),
   nl: document.querySelector("#nl"),
   runNl: document.querySelector("#run-nl"),
+  assistantMessages: document.querySelector("#assistant-messages"),
   commandResult: document.querySelector("#command-result"),
   refresh: document.querySelector("#refresh"),
   list: document.querySelector("#session-list"),
@@ -239,16 +248,15 @@ els.openCreate.addEventListener("click", () => {
   els.cwd.focus();
 });
 els.openRun.addEventListener("click", () => {
-  els.runDialog.showModal();
-  els.commandResult.textContent = "";
+  openAssistant();
   els.nl.focus();
 });
+els.closeRun.addEventListener("click", closeAssistant);
 document.querySelectorAll("[data-close-dialog]").forEach((button) => {
   button.addEventListener("click", () => {
     closeDialog(button.dataset.closeDialog);
   });
 });
-els.runDialog.addEventListener("close", focusSessionInput);
 els.refresh.addEventListener("click", refreshSessions);
 els.configForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -291,7 +299,10 @@ els.input.addEventListener("keydown", (event) => {
 });
 els.output.addEventListener("wheel", handleOutputWheel, { passive: false });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") closeSessionsPanel();
+  if (event.key === "Escape") {
+    closeSessionsPanel();
+    closeAssistant();
+  }
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
@@ -480,27 +491,36 @@ async function createSession() {
 }
 
 async function runNaturalCommand() {
+  const text = els.nl.value.trim();
+  if (!text) return;
+  appendAssistantMessage("user", text);
+  els.nl.value = "";
+  els.runNl.disabled = true;
   try {
     const result = await api("/api/nl", {
       method: "POST",
-      body: JSON.stringify({ text: els.nl.value, currentSessionId: state.selected?.id })
+      body: JSON.stringify({ text, currentSessionId: state.selected?.id })
     });
     if (typeof result === "string") {
-      els.commandResult.textContent = result;
+      appendAssistantMessage("assistant", result);
     } else {
       if (result.session) {
         state.selected = result.session;
       }
-      els.commandResult.textContent = formatCommandResult(result);
-      if (typeof result.output === "string") {
+      appendAssistantMessage("assistant", formatCommandResult(result));
+      const updateTerminal = result.presentation?.updateTerminal !== false;
+      if (updateTerminal && typeof result.output === "string") {
         els.output.textContent = result.output;
         if (state.selected) clearOutputEtag(state.selected.id);
       }
       await refreshSessions();
-      resetOutputPolling(500);
+      if (updateTerminal) resetOutputPolling(500);
     }
   } catch (error) {
-    els.commandResult.textContent = error instanceof Error ? error.message : String(error);
+    appendAssistantMessage("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    els.runNl.disabled = false;
+    els.nl.focus();
   }
 }
 
@@ -885,6 +905,55 @@ function closeSessionsPanel() {
   els.sessionsPanel.setAttribute("aria-hidden", "true");
 }
 
+function openAssistant() {
+  els.runDialog.classList.add("open");
+  els.runDialog.setAttribute("aria-hidden", "false");
+  renderAssistantMessages();
+}
+
+function closeAssistant() {
+  els.runDialog.classList.remove("open");
+  els.runDialog.setAttribute("aria-hidden", "true");
+  focusSessionInput();
+}
+
+function appendAssistantMessage(role, text) {
+  state.assistantMessages.push({
+    role,
+    text: String(text ?? ""),
+    createdAt: new Date().toISOString()
+  });
+  if (state.assistantMessages.length > 80) {
+    state.assistantMessages = state.assistantMessages.slice(-80);
+  }
+  renderAssistantMessages();
+}
+
+function renderAssistantMessages() {
+  if (!els.assistantMessages) return;
+  if (!state.assistantMessages.length) {
+    els.assistantMessages.innerHTML = `<div class="assistant-empty">${escapeHtml(t("assistantEmpty"))}</div>`;
+    return;
+  }
+  els.assistantMessages.innerHTML = state.assistantMessages
+    .map((message) => {
+      const roleLabel =
+        message.role === "user"
+          ? t("assistantUser")
+          : message.role === "error"
+            ? t("assistantError")
+            : "web-pi";
+      return `
+        <div class="assistant-message ${escapeHtml(message.role)}">
+          <div class="assistant-role">${escapeHtml(roleLabel)}</div>
+          <div class="assistant-text">${escapeHtml(message.text)}</div>
+        </div>
+      `;
+    })
+    .join("");
+  els.assistantMessages.scrollTop = els.assistantMessages.scrollHeight;
+}
+
 function closeDialog(dialogId) {
   const dialog = document.querySelector(`#${dialogId}`);
   if (dialog?.open) dialog.close();
@@ -992,13 +1061,14 @@ function applyLanguage() {
   els.refresh.textContent = text.refresh;
   els.send.textContent = text.send;
   els.create.textContent = text.create;
-  els.runNl.textContent = text.run;
+  els.runNl.textContent = text.send;
   document.querySelector("#confirm-delete").textContent = text.delete;
   els.input.placeholder = text.sendPlaceholder;
   els.name.placeholder = text.namePlaceholder;
   els.cwd.placeholder = text.cwdPlaceholder;
   els.project.placeholder = text.projectPlaceholder;
   els.nl.placeholder = text.nlPlaceholder;
+  renderAssistantMessages();
   if (!state.selected) els.title.textContent = text.noSession;
 }
 
@@ -1016,6 +1086,9 @@ function showError(error) {
 
 function formatCommandResult(result) {
   if (!result || typeof result !== "object") return String(result);
+  if (result.command?.type === "assistant" && typeof result.answer === "string" && result.answer.trim()) {
+    return result.answer;
+  }
   if (Array.isArray(result.sessions)) return formatSessionList(result.sessions);
   if (result.command?.type === "help" && typeof result.help === "string") return result.help;
   if (result.command?.type === "send") return state.language === "zh" ? "已发送。" : "Sent.";
