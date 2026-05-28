@@ -16,6 +16,7 @@ const publicDir = path.resolve(__dirname, "..", "public");
 const SEND_FOLLOWUP_DELAY_MS = 5_000;
 const SEND_FOLLOWUP_LINES = 30;
 const SESSION_LIST_OUTPUT_LINES = 80;
+const IDLE_OUTPUT_STOPPED_MS = 60_000;
 
 // Security headers for all responses
 const SECURITY_HEADERS = {
@@ -588,28 +589,36 @@ async function listSessionsWithTaskState(context) {
 async function annotateSessionsTaskState(sessions, { store, tmux }) {
   const annotated = [];
   for (const session of sessions) {
-    const snapshot = typeof store.latestOutputSnapshot === "function" ? store.latestOutputSnapshot(session.id) : null;
+    let snapshot = typeof store.latestOutputSnapshot === "function" ? store.latestOutputSnapshot(session.id) : null;
     let output = snapshot?.text ?? "";
     if (session.status === "running" && typeof tmux.capture === "function") {
       try {
         const captured = await tmux.capture(session, SESSION_LIST_OUTPUT_LINES);
         if (captured !== output && typeof store.saveOutput === "function") {
-          store.saveOutput(session.id, SESSION_LIST_OUTPUT_LINES, captured, { touch: false });
+          snapshot = store.saveOutput(session.id, SESSION_LIST_OUTPUT_LINES, captured, { touch: false });
         }
         output = captured;
       } catch {
         // Keep the status list useful even if one tmux pane cannot be captured.
       }
     }
-    annotated.push({ ...session, taskState: detectTaskState(session, output) });
+    annotated.push({ ...session, taskState: detectTaskState(session, output, snapshot) });
   }
   return annotated;
 }
 
-function detectTaskState(session, output) {
+function detectTaskState(session, output, snapshot) {
   if (session.status !== "running") return "completed";
   if (hasConfirmationPrompt(output)) return "needs_confirmation";
+  if (isOutputIdle(snapshot)) return "completed";
   return "in_progress";
+}
+
+function isOutputIdle(snapshot) {
+  if (!snapshot?.capturedAt) return false;
+  const capturedAt = Date.parse(snapshot.capturedAt);
+  if (!Number.isFinite(capturedAt)) return false;
+  return Date.now() - capturedAt >= IDLE_OUTPUT_STOPPED_MS;
 }
 
 function hasConfirmationPrompt(text) {

@@ -563,6 +563,69 @@ test("/api/sessions recognizes opencode permission footer", async () => {
   assert.equal(JSON.parse(body).sessions[0].taskState, "needs_confirmation");
 });
 
+test("/api/sessions marks unchanged output older than one minute as stopped", async () => {
+  const staleTime = new Date(Date.now() - 61_000).toISOString();
+  const sessions = [
+    { id: "session-1", name: "idle", kind: "codex", status: "running", cwd: "/one", tmuxSessionName: "one" },
+    { id: "session-2", name: "confirm", kind: "codex", status: "running", cwd: "/two", tmuxSessionName: "two" },
+    { id: "session-3", name: "changed", kind: "codex", status: "running", cwd: "/three", tmuxSessionName: "three" }
+  ];
+  const saved = [];
+  const store = {
+    list() {
+      return sessions;
+    },
+    updateStatus() {},
+    latestOutputSnapshot(sessionId) {
+      return {
+        id: 1,
+        sessionId,
+        capturedAt: staleTime,
+        lines: 80,
+        text: sessionId === "session-2" ? "Allow once   Allow always   Reject" : "same output"
+      };
+    },
+    saveOutput(sessionId, lines, text) {
+      const snapshot = { id: 2, sessionId, capturedAt: new Date().toISOString(), lines, text };
+      saved.push(snapshot);
+      return snapshot;
+    }
+  };
+  const tmux = {
+    async exists() {
+      return true;
+    },
+    async capture(record) {
+      if (record.id === "session-2") return "Allow once   Allow always   Reject";
+      if (record.id === "session-3") return "new output";
+      return "same output";
+    }
+  };
+
+  const { statusCode, body } = await getJson("/api/sessions", {
+    config: {
+      authToken: "secret",
+      allowRuntimeMode: true,
+      runtimeSettings: {},
+      runtimeSettingsEnabled: false
+    },
+    store,
+    tmux
+  });
+
+  assert.equal(statusCode, 200);
+  const parsed = JSON.parse(body);
+  assert.deepEqual(
+    parsed.sessions.map((session) => ({ name: session.name, taskState: session.taskState })),
+    [
+      { name: "idle", taskState: "completed" },
+      { name: "confirm", taskState: "needs_confirmation" },
+      { name: "changed", taskState: "in_progress" }
+    ]
+  );
+  assert.deepEqual(saved.map((snapshot) => snapshot.sessionId), ["session-3"]);
+});
+
 test("/api/nl switch can target a session by list position", async () => {
   const sessions = [
     { id: "session-1", name: "first", kind: "codex", status: "running", cwd: "/one", tmuxSessionName: "session-1" },
