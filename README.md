@@ -1,6 +1,16 @@
 # Fuluk Gateway
 
-<details open>
+Fuluk Gateway 是一个面向长时间运行 AI CLI 会话的 Web 和 REST 接口。它使用宿主机上的 `tmux` 来管理 `codex`、`claude`、`opencode` 以及本地 shell 会话。
+
+推荐的生产部署方式是在宿主机级别运行 `systemd` 服务。网关会有意运行在宿主机上，这样它可以控制宿主机的 `tmux`，并且可以选择通过 `docker exec` 运行 AI CLI
+
+Fuluk Gateway is a Web and REST interface for long-running AI CLI sessions. It uses host `tmux` to manage `codex`, `claude`, `opencode`, and local shell sessions.
+
+The recommended production deployment is a host-level `systemd` service. The gateway intentionally runs on the host so it can control host `tmux` and optionally run AI CLIs through `docker exec`.
+
+
+
+<details>
 <summary>English</summary>
 
 Fuluk Gateway is a Web and REST interface for long-running AI CLI sessions. It uses host `tmux` to manage `codex`, `claude`, `opencode`, and local shell sessions.
@@ -9,26 +19,26 @@ The recommended production deployment is a host-level `systemd` service. The gat
 
 ## Features
 
-- Web UI for session management
-- REST API for programmatic control
-- Natural language command interface with AI assistant (web-pi)
-- Support for codex, claude, opencode, and runtime sessions
-- Docker worker mode for AI CLI isolation
-- SQLite-based session persistence
+* Web UI for session management
+* REST API for programmatic control
+* Natural language command interface with AI assistant (web-pi)
+* Support for codex, claude, opencode, and runtime sessions
+* Docker worker mode for AI CLI isolation
+* SQLite-based session persistence
 
 ## Requirements
 
-- Linux host with `tmux`
-- Node.js 22+
-- npm
-- Optional: Docker, when using Docker worker mode for AI CLIs
-- Optional: `codex`, `claude`, or `opencode` on the host when using non-Docker mode
+* Linux host with `tmux`
+* Node.js 22+
+* npm
+* Optional: Docker, when using Docker worker mode for AI CLIs
+* Optional: `codex`, `claude`, or `opencode` on the host when using non-Docker mode
 
 ## Quick Development Run
 
 ```bash
 npm ci
-SESSION_GATEWAY_TOKEN=dev-token npm run dev
+SESSION\_GATEWAY\_TOKEN=dev-token npm run dev
 ```
 
 Open `http://127.0.0.1:8787`, then set the same Bearer token in the Config dialog.
@@ -45,7 +55,7 @@ cd /opt/fuluk-gateway
 2. Install the service template:
 
 ```bash
-sudo SERVICE_USER="$(id -un)" SERVICE_GROUP="$(id -gn)" ./deploy/install-systemd.sh
+sudo SERVICE\_USER="$(id -un)" SERVICE\_GROUP="$(id -gn)" ./deploy/install-systemd.sh
 ```
 
 3. Edit the environment file and set a real token:
@@ -57,7 +67,7 @@ sudo editor /etc/fuluk-gateway/fuluk-gateway.env
 At minimum, change:
 
 ```bash
-SESSION_GATEWAY_TOKEN=change-me
+SESSION\_GATEWAY\_TOKEN=change-me
 ```
 
 4. Start and verify:
@@ -78,11 +88,11 @@ journalctl -u fuluk-gateway -f
 
 The provided templates use:
 
-- Application: `/opt/fuluk-gateway`
-- Environment: `/etc/fuluk-gateway/fuluk-gateway.env`
-- Data: `/var/lib/fuluk-gateway`
-- Database: `/var/lib/fuluk-gateway/fuluk-gateway.sqlite`
-- Web settings: `/var/lib/fuluk-gateway/fuluk-gateway-settings.json`
+* Application: `/opt/fuluk-gateway`
+* Environment: `/etc/fuluk-gateway/fuluk-gateway.env`
+* Data: `/var/lib/fuluk-gateway`
+* Database: `/var/lib/fuluk-gateway/fuluk-gateway.sqlite`
+* Web settings: `/var/lib/fuluk-gateway/fuluk-gateway-settings.json`
 
 ## Configuration
 
@@ -90,11 +100,11 @@ See [.env.example](.env.example) for all environment variables.
 
 The Web Config dialog can also set:
 
-- UI language and theme
-- Browser-side Bearer token
-- Codex/OpenCode/Claude deployment mode: Docker or host
-- Docker container names
-- Optional local OpenAI-compatible model for command parsing fallback
+* UI language and theme
+* Browser-side Bearer token
+* Codex/OpenCode/Claude deployment mode: Docker or host
+* Docker container names
+* Optional local OpenAI-compatible model for command parsing fallback
 
 Saved Web settings affect newly created sessions. Existing sessions keep the command they were created with.
 
@@ -155,26 +165,26 @@ Fuluk Gateway 是一个面向长时间运行 AI CLI 会话的 Web 和 REST 接�
 
 ## 功能特性
 
-- 会话管理 Web 界面
-- 可编程控制的 REST API
-- 自然语言命令接口与 AI 助手 (web-pi)
-- 支持 codex、claude、opencode 和 runtime 会话
-- Docker worker 模式实现 AI CLI 隔离
-- 基于 SQLite 的会话持久化
+* 会话管理 Web 界面
+* 可编程控制的 REST API
+* 自然语言命令接口与 AI 助手 (web-pi)
+* 支持 codex、claude、opencode 和 runtime 会话
+* Docker worker 模式实现 AI CLI 隔离
+* 基于 SQLite 的会话持久化
 
 ## 环境要求
 
-- 安装了 `tmux` 的 Linux 宿主机
-- Node.js 22+
-- npm
-- 可选：Docker，用于 AI CLI 的 Docker worker 模式
-- 可选：当使用非 Docker 模式时，宿主机上需要安装 `codex`、`claude` 或 `opencode`
+* 安装了 `tmux` 的 Linux 宿主机
+* Node.js 22+
+* npm
+* 可选：Docker，用于 AI CLI 的 Docker worker 模式
+* 可选：当使用非 Docker 模式时，宿主机上需要安装 `codex`、`claude` 或 `opencode`
 
 ## 快速开发运行
 
 ```bash
 npm ci
-SESSION_GATEWAY_TOKEN=dev-token npm run dev
+SESSION\_GATEWAY\_TOKEN=dev-token npm run dev
 ```
 
 打开 `http://127.0.0.1:8787`，然后在 Config 对话框中设置相同的 Bearer token。
@@ -191,7 +201,7 @@ cd /opt/fuluk-gateway
 2. 安装服务模板：
 
 ```bash
-sudo SERVICE_USER="$(id -un)" SERVICE_GROUP="$(id -gn)" ./deploy/install-systemd.sh
+sudo SERVICE\_USER="$(id -un)" SERVICE\_GROUP="$(id -gn)" ./deploy/install-systemd.sh
 ```
 
 3. 编辑环境文件并设置真实 token：
@@ -203,7 +213,7 @@ sudo editor /etc/fuluk-gateway/fuluk-gateway.env
 至少需要修改：
 
 ```bash
-SESSION_GATEWAY_TOKEN=change-me
+SESSION\_GATEWAY\_TOKEN=change-me
 ```
 
 4. 启动并验证服务：
@@ -224,11 +234,11 @@ journalctl -u fuluk-gateway -f
 
 提供的模板使用以下路径：
 
-- 应用程序：`/opt/fuluk-gateway`
-- 环境文件：`/etc/fuluk-gateway/fuluk-gateway.env`
-- 数据目录：`/var/lib/fuluk-gateway`
-- 数据库：`/var/lib/fuluk-gateway/fuluk-gateway.sqlite`
-- Web 设置：`/var/lib/fuluk-gateway/fuluk-gateway-settings.json`
+* 应用程序：`/opt/fuluk-gateway`
+* 环境文件：`/etc/fuluk-gateway/fuluk-gateway.env`
+* 数据目录：`/var/lib/fuluk-gateway`
+* 数据库：`/var/lib/fuluk-gateway/fuluk-gateway.sqlite`
+* Web 设置：`/var/lib/fuluk-gateway/fuluk-gateway-settings.json`
 
 ## 配置
 
@@ -236,11 +246,11 @@ journalctl -u fuluk-gateway -f
 
 Web Config 对话框也可以设置：
 
-- UI 语言和主题
-- 浏览器侧 Bearer token
-- Codex/OpenCode/Claude 部署模式：Docker 或宿主机
-- Docker 容器名称
-- 可选的本地 OpenAI 兼容模型，用作命令解析回退
+* UI 语言和主题
+* 浏览器侧 Bearer token
+* Codex/OpenCode/Claude 部署模式：Docker 或宿主机
+* Docker 容器名称
+* 可选的本地 OpenAI 兼容模型，用作命令解析回退
 
 保存的 Web 设置会影响新创建的会话。已有会话会保留创建时使用的命令。
 
@@ -291,3 +301,4 @@ sudo journalctl -u fuluk-gateway -f
 详细的 Web 和 REST 用法见 [USAGE.md](USAGE.md)。
 
 </details>
+
