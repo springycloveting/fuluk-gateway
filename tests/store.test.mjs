@@ -134,3 +134,29 @@ test("SessionStore deletes a session and its output snapshots", () => {
   assert.equal(store.delete(session.id), false);
   store.close();
 });
+
+test("SessionStore reads the latest output snapshot", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-"));
+  const store = new SessionStore(path.join(dir, "test.sqlite"));
+  const session = store.create({ kind: "runtime", cwd: dir, name: "snapshot-test" }, "/bin/bash", []);
+
+  store.saveOutput(session.id, 10, "old output");
+  const latest = store.saveOutput(session.id, 20, "new output");
+
+  assert.deepEqual(store.latestOutputSnapshot(session.id), latest);
+  assert.equal(store.latestOutputSnapshot("missing"), null);
+  store.close();
+});
+
+test("SessionStore can save background output without touching session order", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-"));
+  const store = new SessionStore(path.join(dir, "test.sqlite"));
+  const older = store.create({ kind: "runtime", cwd: dir, name: "older-output" }, "/bin/bash", []);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const newer = store.create({ kind: "runtime", cwd: dir, name: "newer-output" }, "/bin/bash", []);
+
+  store.saveOutput(older.id, 80, "background scan", { touch: false });
+
+  assert.equal(store.list()[0].id, newer.id);
+  store.close();
+});

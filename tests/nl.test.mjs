@@ -193,6 +193,30 @@ test("parses output commands with line counts", () => {
   });
 });
 
+test("parses ordinal output commands", () => {
+  assert.deepEqual(parseNaturalCommand("查看第二个会话"), {
+    type: "output",
+    target: null,
+    targetIndex: 2,
+    lines: 50,
+    needsCurrentSession: false
+  });
+  assert.deepEqual(parseNaturalCommand("查看第三个会话后 100 行"), {
+    type: "output",
+    target: null,
+    targetIndex: 3,
+    lines: 100,
+    needsCurrentSession: false
+  });
+  assert.deepEqual(parseNaturalCommand("第二个会话最近输出"), {
+    type: "output",
+    target: null,
+    targetIndex: 2,
+    lines: 50,
+    needsCurrentSession: false
+  });
+});
+
 test("parses current-session output commands", () => {
   assert.deepEqual(parseNaturalCommand("查看会话"), {
     type: "output",

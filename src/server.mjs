@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseWithLocalModel } from "./ai_parser.mjs";
 import { loadConfig, updateRuntimeSettings } from "./config.mjs";
+import { CodeClipSessionRecorder } from "./codeclip_recorder.mjs";
 import { isAuthorizedHeader } from "./auth.mjs";
 import { parseNaturalCommand } from "./nl.mjs";
 import { SessionStore } from "./store.mjs";
@@ -14,6 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(__dirname, "..", "public");
 const SEND_FOLLOWUP_DELAY_MS = 5_000;
 const SEND_FOLLOWUP_LINES = 30;
+const SESSION_LIST_OUTPUT_LINES = 80;
 
 // Security headers for all responses
 const SECURITY_HEADERS = {
@@ -33,9 +35,13 @@ export function createSessionGatewayServer(options = {}) {
   const config = options.config ?? loadConfig();
   const store = options.store ?? new SessionStore(config.databasePath);
   const tmux = options.tmux ?? new TmuxBackend(config);
+  const sessionRecorder =
+    options.sessionRecorder ?? new CodeClipSessionRecorder({ sessionsDir: config.codeClipSessionsDir });
   const staticDir = options.publicDir ?? publicDir;
 
-  return http.createServer((req, res) => handleRequest(req, res, { config, store, tmux, publicDir: staticDir }));
+  return http.createServer((req, res) =>
+    handleRequest(req, res, { config, store, tmux, sessionRecorder, publicDir: staticDir })
+  );
 }
 
 export async function handleSessionGatewayRequest(req, res, context) {
@@ -112,7 +118,7 @@ async function handleApi(req, res, url, context) {
   const { config, store } = context;
 
   if (method === "GET" && pathname === "/api/sessions") {
-    const sessions = await refreshStatuses(store.list(), context);
+    const sessions = await listSessionsWithTaskState(context);
     sendJson(res, 200, { sessions });
     return;
   }
@@ -189,6 +195,7 @@ async function handleSessionAction(req, res, url, method, idOrName, action, cont
   if (method === "POST" && action === "input") {
     const body = await readJsonBody(req);
     if (typeof body.text !== "string" || !body.text.trim()) throw new Error("text is required");
+    await recordFinalAnswerBeforeInput(session, body.text, context);
     await tmux.send(session, body.text);
     store.saveInput(session.id, body.text);
     store.touch(session.id);
@@ -265,7 +272,7 @@ async function handleNaturalLanguage(req, res, context) {
   }
 
   if (command.type === "list") {
-    const sessions = (await refreshStatuses(store.list(), context)).filter(
+    const sessions = (await listSessionsWithTaskState(context)).filter(
       (session) => !command.runningOnly || session.status === "running"
     );
     sendJson(res, 200, { command, sessions });
@@ -274,7 +281,9 @@ async function handleNaturalLanguage(req, res, context) {
 
   if (command.type === "send") {
     const session = requireCommandSession(command, body, context);
+    await recordFinalAnswerBeforeInput(session, command.text, context);
     await tmux.send(session, command.text);
+    saveInputIfSupported(store, session.id, command.text);
     store.touch(session.id);
     const output = await captureAfterSend(session, context);
     sendJson(res, 200, { command, ok: true, session, output });
@@ -327,16 +336,127 @@ async function captureAfterSend(session, { config, store, tmux }) {
   return output;
 }
 
+async function recordFinalAnswerBeforeInput(session, text, context) {
+  try {
+    await context.sessionRecorder?.recordBeforeInput(session, text, context);
+  } catch (error) {
+    console.warn(`CodeClip session record failed: ${errorMessage(error)}`);
+  }
+}
+
+function saveInputIfSupported(store, sessionId, text) {
+  if (typeof store.saveInput === "function") store.saveInput(sessionId, text);
+}
+
 async function parseCommand(text, { config }) {
   let command;
+  const parser = config.runtimeSettings?.commandParser;
+
+  if (parser?.mode === "web-ai-agent-pi" && parser.webAiAgentPiUrl) {
+    try {
+      command = await parseWithWebAiAgentPi(text, parser);
+    } catch (error) {
+      console.warn(`web-ai-agent-pi parser failed, falling back to rules: ${errorMessage(error)}`);
+      command = parseNaturalCommand(text);
+    }
+    assertAiCreateIntent(command, text);
+    return applyDeploymentHints(command, text);
+  }
+
   try {
     command = parseNaturalCommand(text);
   } catch (ruleError) {
     if (errorMessage(ruleError).startsWith("Ambiguous natural-language command:")) throw ruleError;
-    if (!config.runtimeSettings?.commandParser?.enabled) throw ruleError;
+    if (!parser?.enabled) throw ruleError;
     command = await parseWithLocalModel(text, config.runtimeSettings);
+    assertAiCreateIntent(command, text);
   }
   return applyDeploymentHints(command, text);
+}
+
+async function parseWithWebAiAgentPi(text, parser) {
+  const headers = { "content-type": "application/json" };
+  if (parser.webAiAgentPiToken) {
+    headers["authorization"] = `Bearer ${parser.webAiAgentPiToken}`;
+  }
+
+  const response = await fetch(`${parser.webAiAgentPiUrl}/api/nl`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ text })
+  });
+
+  if (!response.ok) {
+    throw new Error(`web-ai-agent-pi request failed: ${response.status}`);
+  }
+
+  const data = await response.json();
+  return convertWebAiAgentPiCommand(data);
+}
+
+function convertWebAiAgentPiCommand(data) {
+  const type = data.command?.type;
+  if (!type) throw new Error("Invalid web-ai-agent-pi response: missing command type");
+
+  if (type === "list") {
+    return { type: "list", runningOnly: false };
+  }
+
+  if (type === "create") {
+    const deployment = data.command.deploymentMode ? { mode: data.command.deploymentMode } : undefined;
+    return {
+      type: "create",
+      input: {
+        kind: data.command.kind || "codex",
+        cwd: data.command.cwd,
+        name: data.command.name,
+        project: null,
+        ...(deployment ? { deployment } : {})
+      }
+    };
+  }
+
+  if (type === "send") {
+    return {
+      type: "send",
+      target: data.session || null,
+      text: data.output || ""
+    };
+  }
+
+  if (type === "output") {
+    return {
+      type: "output",
+      target: data.session || null,
+      lines: 100
+    };
+  }
+
+  if (type === "stop") {
+    return { type: "stop", target: data.session || null };
+  }
+
+  if (type === "restart") {
+    return { type: "restart", target: data.session || null };
+  }
+
+  return { type: "help" };
+}
+
+function assertAiCreateIntent(command, text) {
+  if (command.type !== "create") return;
+  if (hasExplicitCreateIntent(text)) return;
+  throw new Error("Create command requires an explicit create-session request");
+}
+
+function hasExplicitCreateIntent(text) {
+  const kind = "codex|claude\\s+code|claud\\s+code|claude|claud|opencode|open code|pi-os|pi os|runtime|本地";
+  return (
+    new RegExp(`(?:新建|创建|建|启动)(?:一个)?\\s*(?:(?:非\\s*docker|host|本机|宿主机|docker)\\s*(?:模式)?\\s*的?\\s*)?(?:${kind})?\\s*会话`, "iu").test(text) ||
+    new RegExp(`(?:新建|创建|建|启动)(?:一个)?\\s*(?:${kind})`, "iu").test(text) ||
+    new RegExp(`^(?:create|new|start)\\s+(?:a\\s+)?(?:${kind})(?:\\s+session)?\\b`, "iu").test(text) ||
+    /^(?:create|new|start)\s+(?:a\s+)?session\b/iu.test(text)
+  );
 }
 
 function applyDeploymentHints(command, text) {
@@ -458,6 +578,60 @@ async function refreshStatuses(sessions, { store, tmux }) {
     if (nextStatus !== session.status) store.updateStatus(session.id, nextStatus);
   }
   return store.list();
+}
+
+async function listSessionsWithTaskState(context) {
+  const sessions = await refreshStatuses(context.store.list(), context);
+  return annotateSessionsTaskState(sessions, context);
+}
+
+async function annotateSessionsTaskState(sessions, { store, tmux }) {
+  const annotated = [];
+  for (const session of sessions) {
+    const snapshot = typeof store.latestOutputSnapshot === "function" ? store.latestOutputSnapshot(session.id) : null;
+    let output = snapshot?.text ?? "";
+    if (session.status === "running" && typeof tmux.capture === "function") {
+      try {
+        const captured = await tmux.capture(session, SESSION_LIST_OUTPUT_LINES);
+        if (captured !== output && typeof store.saveOutput === "function") {
+          store.saveOutput(session.id, SESSION_LIST_OUTPUT_LINES, captured, { touch: false });
+        }
+        output = captured;
+      } catch {
+        // Keep the status list useful even if one tmux pane cannot be captured.
+      }
+    }
+    annotated.push({ ...session, taskState: detectTaskState(session, output) });
+  }
+  return annotated;
+}
+
+function detectTaskState(session, output) {
+  if (session.status !== "running") return "completed";
+  if (hasConfirmationPrompt(output)) return "needs_confirmation";
+  return "in_progress";
+}
+
+function hasConfirmationPrompt(text) {
+  const normalized = stripAnsi(String(text ?? ""));
+  const lines = normalized
+    .split("\n")
+    .filter((line) => line.trim())
+    .slice(-10);
+  const context = lines.join("\n");
+  if (/allow\?\s*YES\?/i.test(context)) return true;
+  return lines.some(
+    (line) =>
+      /\ballow\s+once\b.*\ballow\s+(?:always|allways)\b.*\breject\b/i.test(line) ||
+      /(?:^|[\s>❯›»])[1-9]\s*[\).:\]-]\s*(?:yes|allow(?:\s+(?:once|always|allways))?)\b/i.test(line) ||
+      /(?:^|[\s>❯›»])a\s*[\).:\]-]\s*allow(?:\s+(?:once|always|allways))?\b/i.test(line) ||
+      /^\s*allow(?:\s+(?:once|always|allways))?\b/i.test(line) ||
+      /(?:^|[\s>❯›»])y\s*[\).:\]-]\s*yes\b/i.test(line)
+  );
+}
+
+function stripAnsi(text) {
+  return text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
 function findExistingNamedSession(input, { store }) {

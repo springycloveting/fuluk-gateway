@@ -9,7 +9,7 @@ const kindMap = {
   runtime: "runtime",
   本地: "runtime"
 };
-const kindPattern = "codex|claude\\s+code|claud\\s+code|claude|claud|opencode|open code|runtime|本地";
+const kindPattern = "codex|claude\\s+code|claud\\s+code|claude|claud|opencode|open code|pi-os|pi os|runtime|本地";
 
 const targetPattern = "[A-Za-z0-9_.-]+";
 
@@ -34,6 +34,20 @@ export function parseNaturalCommand(text) {
 
   if (isCurrentOutputCommand(normalized)) {
     return { type: "output", target: null, lines: parseCurrentOutputLines(normalized), needsCurrentSession: true };
+  }
+
+  const zhTargetedOutput = normalized.match(
+    /^(?:查看|看|看看|看一下|显示|读取)\s*(.+?)\s*会话(?:\s*(?:最近|后)\s*(\d+)?\s*行?)?(?:\s*输[。.\s]*出)?[。.\s]*$/iu
+  );
+  if (zhTargetedOutput) {
+    return buildOutputCommand(zhTargetedOutput[1], zhTargetedOutput[2]);
+  }
+
+  const zhSuffixedOutput = normalized.match(
+    /^(.+?)\s*会话\s*(?:(?:最近|后)\s*(\d+)?\s*行?)?\s*输[。.\s]*出[。.\s]*$/iu
+  );
+  if (zhSuffixedOutput) {
+    return buildOutputCommand(zhSuffixedOutput[1], zhSuffixedOutput[2]);
   }
 
   const zhOutput = normalized.match(new RegExp(`^(${targetPattern})\\s*最近\\s*(\\d+)?\\s*行?\\s*输[。.\\s]*出[。.\\s]*$`, "i"));
@@ -209,6 +223,16 @@ function buildSendCommand(targetText, text) {
     type: "send",
     ...target,
     text: text.trim(),
+    needsCurrentSession: !target.target && !target.targetIndex
+  };
+}
+
+function buildOutputCommand(targetText, lines) {
+  const target = parseSessionTarget(targetText);
+  return {
+    type: "output",
+    ...target,
+    lines: parseLines(lines, 50),
     needsCurrentSession: !target.target && !target.targetIndex
   };
 }

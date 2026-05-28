@@ -111,7 +111,7 @@ export class SessionStore {
     this.db.prepare("update sessions set updated_at = ? where id = ?").run(nowIso(), id);
   }
 
-  saveOutput(sessionId, lines, text) {
+  saveOutput(sessionId, lines, text, options = {}) {
     const capturedAt = nowIso();
     const result = this.db
       .prepare("insert into output_snapshots (session_id, captured_at, lines, text) values (?, ?, ?, ?)")
@@ -127,7 +127,7 @@ export class SessionStore {
       )
       .run(sessionId, sessionId);
 
-    this.touch(sessionId);
+    if (options.touch !== false) this.touch(sessionId);
 
     return {
       id: Number(result.lastInsertRowid),
@@ -136,6 +136,13 @@ export class SessionStore {
       lines,
       text
     };
+  }
+
+  latestOutputSnapshot(sessionId) {
+    const row = this.db
+      .prepare("select * from output_snapshots where session_id = ? order by id desc limit 1")
+      .get(sessionId);
+    return row ? mapOutputSnapshotRow(row) : null;
   }
 
   delete(id) {
@@ -265,5 +272,15 @@ function mapInputHistoryRow(row) {
     sessionKind: row.session_kind ?? null,
     text: row.text,
     createdAt: row.created_at
+  };
+}
+
+function mapOutputSnapshotRow(row) {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    capturedAt: row.captured_at,
+    lines: row.lines,
+    text: row.text
   };
 }

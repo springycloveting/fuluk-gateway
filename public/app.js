@@ -5,6 +5,8 @@ const state = {
   outputLoadingSessionId: null,
   outputEtags: new Map(),
   outputPollTimer: null,
+  sessionPollTimer: null,
+  sessionLoading: false,
   outputPollDelayMs: 1000,
   outputWheelLastSentAt: 0,
   allYesEnabled: localStorage.getItem("sessionGatewayAllYes") === "1",
@@ -62,6 +64,10 @@ const translations = {
     selectSession: "请先选择一个会话",
     statusRunning: "运行",
     statusStopped: "停止",
+    taskCompleted: "任务完成",
+    taskInProgress: "进行中",
+    taskNeedsConfirmation: "需要确认",
+    confirmAlert: "需要确认：{name}",
     sendPlaceholder: "发送到当前会话",
     namePlaceholder: "会话名，例如 codex-app",
     cwdPlaceholder: "工作目录，留空则使用默认会话目录",
@@ -111,6 +117,10 @@ const translations = {
     selectSession: "Select a session first",
     statusRunning: "Running",
     statusStopped: "Stopped",
+    taskCompleted: "Done",
+    taskInProgress: "In progress",
+    taskNeedsConfirmation: "Needs confirmation",
+    confirmAlert: "Needs confirmation: {name}",
     sendPlaceholder: "Send text to selected session",
     namePlaceholder: "Session name, e.g. codex-app",
     cwdPlaceholder: "Working directory; leave blank for the default session folder",
@@ -121,6 +131,7 @@ const translations = {
 
 const els = {
   openSessions: document.querySelector("#open-sessions"),
+  confirmAlert: document.querySelector("#confirm-alert"),
   closeSessions: document.querySelector("#close-sessions"),
   sessionsTitle: document.querySelector("[data-i18n='sessionsTitle']"),
   sessionsPanel: document.querySelector("#sessions-panel"),
@@ -208,6 +219,10 @@ els.openSessions.addEventListener("click", () => {
   els.sessionsPanel.setAttribute("aria-hidden", "false");
   refreshSessions();
 });
+els.confirmAlert.addEventListener("click", async () => {
+  const session = firstSessionNeedingConfirmation();
+  if (session) await selectSession(session);
+});
 els.closeSessions.addEventListener("click", closeSessionsPanel);
 els.openConfig.addEventListener("click", async () => {
   await loadConfig();
@@ -280,8 +295,10 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     clearOutputPoll();
+    clearSessionPoll();
   } else {
     resetOutputPolling(1000);
+    scheduleSessionPoll(1000);
   }
 });
 
@@ -292,6 +309,7 @@ updateCreateDeploymentControls();
 await refreshSessions();
 renderQuickKeys();
 resetOutputPolling(1000);
+scheduleSessionPoll(5000);
 
 async function api(path, options = {}) {
   const headers = {
@@ -313,6 +331,7 @@ async function loadConfig() {
   try {
     const data = await api("/api/config");
     applyServerSettings(data.settings);
+    applyAiParserVisibility();
   } catch (error) {
     showError(error);
   }
@@ -328,28 +347,71 @@ async function saveConfig() {
     applyLanguage();
     applyTheme();
 
-    const settings = {
-      cliDeployment: state.cliDeploymentDefaults,
-      commandParser: {
-        enabled: els.aiParserEnabled.checked,
-        mode: els.aiParserEnabled.checked ? "rules-first-ai-fallback" : "rules-only",
+    const commandParser = {
+      enabled: els.aiParserEnabled.checked,
+      mode: els.aiParserEnabled.checked ? "rules-first-ai-fallback" : "rules-only"
+    };
+
+    if (els.aiParserEnabled.checked && !isAiParserConfigSaved()) {
+      commandParser.baseUrl = els.aiParserBaseUrl.value;
+      commandParser.model = els.aiParserModel.value;
+      commandParser.apiKey = els.aiParserApiKey.value;
+
+      localStorage.setItem("sessionGatewayAiParser", JSON.stringify({
         baseUrl: els.aiParserBaseUrl.value,
         model: els.aiParserModel.value,
         apiKey: els.aiParserApiKey.value
-      }
+      }));
+    } else if (isAiParserConfigSaved()) {
+      const saved = JSON.parse(localStorage.getItem("sessionGatewayAiParser") || "{}");
+      commandParser.baseUrl = saved.baseUrl;
+      commandParser.model = saved.model;
+      commandParser.apiKey = saved.apiKey;
+    }
+
+    const settings = {
+      cliDeployment: state.cliDeploymentDefaults,
+      commandParser
     };
     const data = await api("/api/config", {
       method: "PUT",
       body: JSON.stringify({ settings })
     });
     applyServerSettings(data.settings);
+    applyAiParserVisibility();
     els.configDialog.close();
   } catch (error) {
     showError(error);
   }
 }
 
+function isAiParserConfigSaved() {
+  const saved = localStorage.getItem("sessionGatewayAiParser");
+  if (!saved) return false;
+  const config = JSON.parse(saved);
+  return config.baseUrl && config.model;
+}
+
+function applyAiParserVisibility() {
+  const saved = isAiParserConfigSaved();
+  const fieldset = els.aiParserEnabled.closest("fieldset");
+  const inputs = fieldset.querySelectorAll("input:not(#ai-parser-enabled)");
+
+  inputs.forEach((input) => {
+    input.hidden = saved;
+  });
+
+  if (saved) {
+    const config = JSON.parse(localStorage.getItem("sessionGatewayAiParser") || "{}");
+    els.aiParserBaseUrl.value = config.baseUrl || "";
+    els.aiParserModel.value = config.model || "";
+    els.aiParserApiKey.value = config.apiKey || "";
+  }
+}
+
 async function refreshSessions() {
+  if (state.sessionLoading) return;
+  state.sessionLoading = true;
   try {
     const data = await api("/api/sessions");
     state.sessions = data.sessions;
@@ -357,6 +419,7 @@ async function refreshSessions() {
       const current = state.sessions.find((session) => session.id === state.selected.id);
       state.selected = current || null;
       renderSessions();
+      renderTaskAlert();
       renderQuickKeys();
       if (state.selected?.status === "running") {
         await loadOutput();
@@ -372,6 +435,7 @@ async function refreshSessions() {
     }
     state.selected = state.sessions.find((session) => session.status === "running") ?? state.sessions[0] ?? null;
     renderSessions();
+    renderTaskAlert();
     renderQuickKeys();
     if (state.selected?.status === "running") {
       await loadOutput();
@@ -381,6 +445,9 @@ async function refreshSessions() {
     }
   } catch (error) {
     showError(error);
+  } finally {
+    state.sessionLoading = false;
+    scheduleSessionPoll();
   }
 }
 
@@ -479,6 +546,7 @@ function updateOutputText(text) {
     if (shouldStickToBottom) {
       els.output.scrollTop = els.output.scrollHeight;
     }
+    markSelectedTaskState(findYesOption(text) ? "needs_confirmation" : "in_progress");
     maybeAutoYes(text);
 }
 
@@ -507,7 +575,7 @@ function maybeAutoYes(text, options = {}) {
   const sessionId = state.selected.id;
   const signature = match.signature;
   if (!options.force && state.autoYesSignatures.get(sessionId) === signature) return;
-  sendAutoYes(sessionId, signature);
+  sendAutoYes(sessionId, signature, match.key, match.type);
 }
 
 function findYesOption(text) {
@@ -515,12 +583,32 @@ function findYesOption(text) {
   const lines = normalized
     .split("\n")
     .filter((line) => line.trim())
-    .slice(-6);
+    .slice(-10);
   const context = lines.map((line) => line.trim()).join("\n");
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index];
-    if (/(?:^|[\s>❯›»])1\s*[\).:\]-]\s*yes\b/i.test(line)) {
-      return { signature: context };
+    // 匹配 opencode 权限底栏："Allow once   Allow always   Reject ... enter confirm"
+    if (/\ballow\s+once\b.*\ballow\s+(?:always|allways)\b.*\breject\b/i.test(line)) {
+      return { signature: context, key: "Enter", type: "key" };
+    }
+    // 匹配 "1) yes" / "1.Allow" / "2. Allow once" / "3: Allow always" 格式
+    const numericAllow = line.match(
+      /(?:^|[\s>❯›»])([1-9])\s*[\).:\]-]\s*(?:yes|allow(?:\s+(?:once|always|allways))?)\b/i
+    );
+    if (numericAllow) {
+      return { signature: context, key: numericAllow[1] };
+    }
+    // 匹配 "a) allow" / "a. Allow once" / "a-Allow always" 格式
+    if (/(?:^|[\s>❯›»])a\s*[\).:\]-]\s*allow(?:\s+(?:once|always|allways))?\b/i.test(line)) {
+      return { signature: context, key: "a" };
+    }
+    // 匹配单独一行 "Allow" / "Allow once" / "Allow always"，默认选第一个选项
+    if (/^\s*allow(?:\s+(?:once|always|allways))?\b/i.test(line)) {
+      return { signature: context, key: "1" };
+    }
+    // 匹配 "y) yes" / "y. yes" 格式
+    if (/(?:^|[\s>❯›»])y\s*[\).:\]-]\s*yes\b/i.test(line)) {
+      return { signature: context, key: "y" };
     }
   }
   return null;
@@ -570,13 +658,20 @@ async function sendQuickText(text) {
   }
 }
 
-async function sendAutoYes(sessionId, signature) {
+async function sendAutoYes(sessionId, signature, key = "1", type = "text") {
   if (!state.selected || state.selected.id !== sessionId || state.selected.status !== "running") return;
   try {
-    await api(`/api/sessions/${encodeURIComponent(sessionId)}/input`, {
-      method: "POST",
-      body: JSON.stringify({ text: "1" })
-    });
+    if (type === "key") {
+      await api(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, {
+        method: "POST",
+        body: JSON.stringify({ keys: [key] })
+      });
+    } else {
+      await api(`/api/sessions/${encodeURIComponent(sessionId)}/input`, {
+        method: "POST",
+        body: JSON.stringify({ text: key })
+      });
+    }
     state.autoYesSignatures.set(sessionId, signature);
     clearOutputEtag(sessionId);
     resetOutputPolling(500);
@@ -746,28 +841,15 @@ function renderSessions() {
       <span class="session-main">
         <span class="session-name">${escapeHtml(session.name)}</span>
         <span class="session-controls">
-          <span class="session-status ${session.status === "running" ? "running" : "stopped"}">${escapeHtml(
-            sessionStatusLabel(session)
+          <span class="task-state ${taskStateClass(session.taskState)}">${escapeHtml(
+            taskStateLabel(session)
           )}</span>
           <button class="session-delete" type="button" title="${escapeHtml(t("delete"))}">${escapeHtml(t("delete"))}</button>
         </span>
       </span>
-      <span class="session-meta">${escapeHtml(session.kind)} · ${escapeHtml(sessionDeploymentLabel(session))} · ${escapeHtml(session.cwd)}</span>
+      <span class="session-meta">${escapeHtml(sessionStatusLabel(session))} · ${escapeHtml(session.kind)} · ${escapeHtml(sessionDeploymentLabel(session))} · ${escapeHtml(session.cwd)}</span>
     `;
-    item.addEventListener("click", async () => {
-      state.selected = session;
-      renderSessions();
-      renderQuickKeys();
-      closeSessionsPanel();
-      if (session.status === "running") {
-        clearOutputEtag(session.id);
-        await loadOutput({ force: true });
-        resetOutputPolling(1000);
-      } else {
-        clearOutputPoll();
-        showSessionSummary(session);
-      }
-    });
+    item.addEventListener("click", () => selectSession(session));
     item.querySelector(".session-delete").addEventListener("click", (event) => {
       event.stopPropagation();
       openDeleteDialog(session);
@@ -777,6 +859,22 @@ function renderSessions() {
 
   if (!state.sessions.length) {
     els.list.textContent = "No sessions.";
+  }
+}
+
+async function selectSession(session) {
+  state.selected = session;
+  renderSessions();
+  renderTaskAlert();
+  renderQuickKeys();
+  closeSessionsPanel();
+  if (session.status === "running") {
+    clearOutputEtag(session.id);
+    await loadOutput({ force: true });
+    resetOutputPolling(1000);
+  } else {
+    clearOutputPoll();
+    showSessionSummary(session);
   }
 }
 
@@ -836,6 +934,20 @@ function focusSessionInput() {
 function applyServerSettings(settings) {
   state.cliDeploymentDefaults = settings?.cliDeployment ?? {};
   const commandParser = settings?.commandParser ?? {};
+
+  const savedConfig = localStorage.getItem("sessionGatewayAiParser");
+  if (savedConfig) {
+    const saved = JSON.parse(savedConfig);
+    if (saved.baseUrl && saved.model) {
+      els.aiParserBaseUrl.value = saved.baseUrl;
+      els.aiParserModel.value = saved.model || "";
+      els.aiParserApiKey.value = saved.apiKey || "";
+      els.aiParserEnabled.checked = commandParser.enabled;
+      updateCreateDeploymentControls();
+      return;
+    }
+  }
+
   els.aiParserEnabled.checked = Boolean(commandParser.enabled);
   els.aiParserBaseUrl.value = commandParser.baseUrl ?? "";
   els.aiParserModel.value = commandParser.model ?? "";
@@ -866,6 +978,7 @@ function applyLanguage() {
     element.textContent = text[element.dataset.i18n] ?? element.textContent;
   });
   els.openSessions.textContent = text.sessions;
+  renderTaskAlert();
   els.openCreate.textContent = text.create;
   els.openRun.textContent = text.command;
   els.restart.textContent = text.restart;
@@ -938,6 +1051,18 @@ function sessionStatusLabel(session) {
   return session.status === "running" ? t("statusRunning") : t("statusStopped");
 }
 
+function taskStateLabel(session) {
+  if (session.taskState === "needs_confirmation") return t("taskNeedsConfirmation");
+  if (session.taskState === "completed") return t("taskCompleted");
+  return t("taskInProgress");
+}
+
+function taskStateClass(taskState) {
+  if (taskState === "needs_confirmation") return "needs-confirmation";
+  if (taskState === "completed") return "completed";
+  return "in-progress";
+}
+
 function sessionDeploymentLabel(session) {
   return session.command === "docker" ? t("dockerMode") : t("hostMode");
 }
@@ -974,6 +1099,19 @@ function scheduleOutputPoll(delayMs) {
   state.outputPollTimer = setTimeout(refreshSelectedOutput, delayMs);
 }
 
+function scheduleSessionPoll(delayMs = 5000) {
+  clearSessionPoll();
+  if (document.hidden) return;
+  state.sessionPollTimer = setTimeout(refreshSessions, delayMs);
+}
+
+function clearSessionPoll() {
+  if (state.sessionPollTimer) {
+    clearTimeout(state.sessionPollTimer);
+    state.sessionPollTimer = null;
+  }
+}
+
 function clearOutputPoll() {
   if (state.outputPollTimer) {
     clearTimeout(state.outputPollTimer);
@@ -992,6 +1130,7 @@ function showSessionSummary(session) {
       name: session.name,
       kind: session.kind,
       status: session.status,
+      taskState: taskStateLabel(session),
       deployment: sessionDeploymentLabel(session),
       cwd: session.cwd,
       project: session.project,
@@ -1001,6 +1140,32 @@ function showSessionSummary(session) {
     null,
     2
   );
+}
+
+function firstSessionNeedingConfirmation() {
+  return state.sessions.find((session) => session.taskState === "needs_confirmation") ?? null;
+}
+
+function renderTaskAlert() {
+  const session = firstSessionNeedingConfirmation();
+  if (!session) {
+    els.confirmAlert.hidden = true;
+    els.confirmAlert.textContent = "";
+    return;
+  }
+  els.confirmAlert.hidden = false;
+  els.confirmAlert.textContent = t("confirmAlert").replace("{name}", session.name);
+  els.confirmAlert.title = session.name;
+}
+
+function markSelectedTaskState(taskState) {
+  if (!state.selected) return;
+  state.selected = { ...state.selected, taskState };
+  state.sessions = state.sessions.map((session) =>
+    session.id === state.selected.id ? { ...session, taskState } : session
+  );
+  renderTaskAlert();
+  renderSessions();
 }
 
 function escapeHtml(value) {

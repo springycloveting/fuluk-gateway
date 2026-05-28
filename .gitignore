@@ -5,6 +5,7 @@ data/
 *.log
 .npmrc
 .claude/
+.codegraph/
 CLAUDE.md
 HANDOFF.md
 session-gateway-handoff.md

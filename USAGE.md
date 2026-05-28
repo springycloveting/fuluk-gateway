@@ -46,6 +46,57 @@ sudo systemctl status session-gateway
 | `SESSION_GATEWAY_RUNTIME_SUBMIT_KEY` | runtime 会话发送后的提交键 | `Enter` |
 | `SESSION_GATEWAY_SUBMIT_KEY_DELAY_MS` | 发送文本和提交键之间的延迟毫秒数 | `80` |
 
+## 高级命令解析模式
+
+Session Gateway 支持三种命令解析模式：
+
+### 1. rules-only（默认）
+
+纯规则解析，使用正则表达式匹配用户输入。速度快但不支持复杂语句。
+
+### 2. rules-first-ai-fallback
+
+先尝试规则解析，失败时调用本地 AI 模型解析。
+
+配置示例（`data/session-gateway-settings.json`）：
+
+```json
+{
+  "commandParser": {
+    "mode": "rules-first-ai-fallback",
+    "baseUrl": "http://127.0.0.1:11434/v1",
+    "model": "qwen",
+    "apiKey": "dummy"
+  }
+}
+```
+
+### 3. web-ai-agent-pi（高级模式）
+
+使用 web-ai-agent-pi 服务进行命令解析，支持更自然的语言理解。
+
+首先启动 web-ai-agent-pi 服务：
+
+```bash
+web-ai-agent-pi-server
+```
+
+然后配置 Session Gateway（`data/session-gateway-settings.json`）：
+
+```json
+{
+  "commandParser": {
+    "mode": "web-ai-agent-pi",
+    "webAiAgentPiUrl": "http://127.0.0.1:8786",
+    "webAiAgentPiToken": "your-token"
+  }
+}
+```
+
+环境变量：
+- `WEB_AI_AGENT_PI_PORT` - web-ai-agent-pi 服务端口（默认 8786）
+- `WEB_AI_AGENT_PI_TOKEN` - 认证 token
+
 ## Web 界面使用
 
 ### 1. 访问界面

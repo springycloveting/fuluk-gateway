@@ -1,11 +1,12 @@
 import path from "node:path";
 import fs from "node:fs";
 
-const CLI_KINDS = ["codex", "claude", "opencode"];
+const CLI_KINDS = ["codex", "claude", "opencode", "pi-os"];
 const DEFAULT_CLI_DEPLOYMENT = {
   codex: { mode: "docker", dockerName: "worker-codex" },
   claude: { mode: "docker", dockerName: "worker-claude" },
-  opencode: { mode: "docker", dockerName: "worker-opencode" }
+  opencode: { mode: "docker", dockerName: "worker-opencode" },
+  "pi-os": { mode: "host", dockerName: "" }
 };
 
 export function loadConfig() {
@@ -26,12 +27,16 @@ export function loadConfig() {
     databasePath:
       process.env.SESSION_GATEWAY_DB ??
       path.resolve(process.cwd(), "data", "session-gateway.sqlite"),
+    codeClipSessionsDir:
+      process.env.SESSION_GATEWAY_CODECLIP_SESSIONS_DIR ??
+      "/home/v6/work/CodeClip/data/sessions",
     defaultRuntimeCommand: process.env.SESSION_GATEWAY_RUNTIME ?? "/bin/bash",
     submitKeyDelayMs: parsePositiveInt(process.env.SESSION_GATEWAY_SUBMIT_KEY_DELAY_MS, 80),
     submitKeys: {
       codex: process.env.SESSION_GATEWAY_CODEX_SUBMIT_KEY ?? "Enter",
       claude: process.env.SESSION_GATEWAY_CLAUDE_SUBMIT_KEY ?? "Enter",
       opencode: process.env.SESSION_GATEWAY_OPENCODE_SUBMIT_KEY ?? "Enter",
+      "pi-os": process.env.SESSION_GATEWAY_PI_OS_SUBMIT_KEY ?? "Enter",
       runtime: process.env.SESSION_GATEWAY_RUNTIME_SUBMIT_KEY ?? "Enter"
     },
     cliCommands: {
@@ -39,7 +44,8 @@ export function loadConfig() {
       claude: splitCommand(process.env.SESSION_GATEWAY_CLAUDE_CMD ?? "docker exec -it worker-claude claude"),
       opencode: splitCommand(
         process.env.SESSION_GATEWAY_OPENCODE_CMD ?? "docker exec -it worker-opencode opencode"
-      )
+      ),
+      "pi-os": splitCommand(process.env.SESSION_GATEWAY_PI_OS_CMD ?? "pi-os")
     }
   };
 }
@@ -74,18 +80,22 @@ export function normalizeRuntimeSettings(input = {}) {
 function normalizeCommandParser(input = {}) {
   const current = input && typeof input === "object" ? input : {};
   const mode =
-    current.mode === "rules-first-ai-fallback" || current.mode === "rules-only"
+    current.mode === "rules-first-ai-fallback" ||
+    current.mode === "rules-only" ||
+    current.mode === "web-ai-agent-pi"
       ? current.mode
       : current.enabled
         ? "rules-first-ai-fallback"
         : "rules-only";
-  const enabled = Boolean(current.enabled) && mode === "rules-first-ai-fallback";
+  const enabled = Boolean(current.enabled) && mode !== "rules-only";
   return {
     enabled,
-    mode: enabled ? "rules-first-ai-fallback" : mode,
+    mode: enabled ? mode : "rules-only",
     baseUrl: typeof current.baseUrl === "string" ? current.baseUrl.trim().replace(/\/+$/, "") : "",
     model: typeof current.model === "string" ? current.model.trim() : "",
-    apiKey: typeof current.apiKey === "string" ? current.apiKey.trim() : ""
+    apiKey: typeof current.apiKey === "string" ? current.apiKey.trim() : "",
+    webAiAgentPiUrl: typeof current.webAiAgentPiUrl === "string" ? current.webAiAgentPiUrl.trim().replace(/\/+$/, "") : "",
+    webAiAgentPiToken: typeof current.webAiAgentPiToken === "string" ? current.webAiAgentPiToken.trim() : ""
   };
 }
 

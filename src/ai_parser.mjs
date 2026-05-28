@@ -1,7 +1,7 @@
 import { normalizeLines, sanitizeTmuxName } from "./utils.mjs";
 
 const ALLOWED_TYPES = new Set(["create", "list", "send", "output", "switch", "stop", "restart", "help"]);
-const ALLOWED_KINDS = new Set(["codex", "claude", "opencode", "runtime"]);
+const ALLOWED_KINDS = new Set(["codex", "claude", "opencode", "pi-os", "runtime"]);
 
 export async function parseWithLocalModel(text, settings, fetchImpl = fetch) {
   const parser = settings?.commandParser;
@@ -23,7 +23,7 @@ export async function parseWithLocalModel(text, settings, fetchImpl = fetch) {
           role: "system",
           content: commandManual()
         },
-        { role: "user", content: text }
+        { role: "user", content: `${text} /no_think` }
       ]
     })
   });
@@ -43,7 +43,7 @@ export async function parseWithLocalModel(text, settings, fetchImpl = fetch) {
 
 export function commandManual() {
   return [
-    "You are the command parser for Session Gateway.",
+    "You are the command parser for Session Gateway. Do not generate any <|channel>thought tags or reasoning content. Just give the final answer directly.",
     "Read the user's natural-language command and return exactly one JSON object.",
     "Return JSON only. Do not use markdown. Do not explain.",
     "",
@@ -52,8 +52,9 @@ export function commandManual() {
     "- Never return shell commands, scripts, code, or arbitrary actions.",
     "- If the user asks for an unsupported operation, return {\"type\":\"help\"}.",
     "- Allowed type values: create, list, send, output, switch, stop, restart, help.",
-    "- Allowed CLI kinds for create: codex, claude, opencode, runtime.",
+    "- Allowed CLI kinds for create: codex, claude, opencode, pi-os, runtime.",
     "- Treat 'claude code', 'claud', and 'claud code' as the claude CLI kind.",
+    "- Treat 'pi-os' and 'pi os' as the pi-os CLI kind.",
     "- Session names and project names should use letters, numbers, dot, underscore, or hyphen.",
     "- If the user says name is '<prefix>+folder name' or '<prefix>+文件夹名称', convert it to '<prefix>-<last path segment>'.",
     "",
@@ -63,17 +64,17 @@ export function commandManual() {
     "- create: user asks to create/build/start a new codex, claude, opencode, or runtime session. Extract cwd from directory/folder/path wording when present. If no working directory is specified, omit cwd so the server can choose the default.",
     "- create deployment: if the user says 非docker, non-docker, host, 本机, or 宿主机, include \"deployment\":{\"mode\":\"host\"}. If the user explicitly says docker, include \"deployment\":{\"mode\":\"docker\"}.",
     "- send: user asks to send text/message/instruction to a session. If no target session is named, omit target or set it to null. For text like '发送xxx', strip the send prefix and use only xxx as text. For '发送到web-ai-agent会话xxx', '发送xxx到web-ai-agent会话', or 'xxx到web-ai-agent会话', set target to web-ai-agent and text to xxx. For '发送到第五个会话xxx' or 'xxx到第五个会话', set targetIndex to 5, target to null, and text to xxx.",
-    "- output: user asks to show/capture/recent output for a session. Default lines is 50 unless the user gives a number. If no target session is named, omit target or set it to null, meaning the current session.",
+    "- output: user asks to show/capture/recent output for a session. Default lines is 50 unless the user gives a number. If no target session is named, omit target or set it to null, meaning the current session. For '查看第二个会话' or '第二个会话最近输出', set targetIndex to 2 and target to null.",
     "- ASR-tolerant Chinese: 查看绘画, 查看回话, and 查看对话 mean 查看会话 and should return output target null lines 50.",
     "- switch: user asks to enter/use/switch to a session. For '切换到第二个会话', set targetIndex to 2 and target to null.",
     "- stop: user asks to stop/end a session. For ordinal session wording, use targetIndex.",
     "- restart: user asks to restart a session. For ordinal session wording, use targetIndex.",
     "",
     "Return schemas:",
-    "{\"type\":\"create\",\"input\":{\"kind\":\"codex|claude|opencode|runtime\",\"cwd\":\"optional /path\",\"name\":\"optional\",\"project\":null,\"deployment\":{\"mode\":\"optional host|docker\"}}}",
+    "{\"type\":\"create\",\"input\":{\"kind\":\"codex|claude|opencode|pi-os|runtime\",\"cwd\":\"optional /path\",\"name\":\"optional\",\"project\":null,\"deployment\":{\"mode\":\"optional host|docker\"}}}",
     "{\"type\":\"list\",\"runningOnly\":false}",
     "{\"type\":\"send\",\"target\":\"optional session name or null\",\"targetIndex\":\"optional one-based session position\",\"text\":\"message\"}",
-    "{\"type\":\"output\",\"target\":\"optional session name or null\",\"lines\":50}",
+    "{\"type\":\"output\",\"target\":\"optional session name or null\",\"targetIndex\":\"optional one-based session position\",\"lines\":50}",
     "{\"type\":\"switch\",\"target\":\"optional session name or null\",\"targetIndex\":\"optional one-based session position\"}",
     "{\"type\":\"stop\",\"target\":\"optional session name or null\",\"targetIndex\":\"optional one-based session position\"}",
     "{\"type\":\"restart\",\"target\":\"optional session name or null\",\"targetIndex\":\"optional one-based session position\"}",
@@ -116,6 +117,8 @@ export function commandManual() {
     "JSON: {\"type\":\"output\",\"target\":null,\"lines\":50}",
     "User: codex-app 最近 200 行输出",
     "JSON: {\"type\":\"output\",\"target\":\"codex-app\",\"lines\":200}",
+    "User: 查看第二个会话",
+    "JSON: {\"type\":\"output\",\"target\":null,\"targetIndex\":2,\"lines\":50}",
     "User: 进入 local",
     "JSON: {\"type\":\"switch\",\"target\":\"local\"}",
     "User: 切换到第二个会话",
@@ -178,11 +181,13 @@ export function validateAiCommand(command) {
 
   if (command.type === "output") {
     const target = optionalName(command.target);
+    const targetIndex = optionalTargetIndex(command.targetIndex);
     return {
       type: "output",
       target: target ?? null,
+      ...(targetIndex ? { targetIndex } : {}),
       lines: normalizeLines(command.lines, 50),
-      needsCurrentSession: !target
+      needsCurrentSession: !target && !targetIndex
     };
   }
 

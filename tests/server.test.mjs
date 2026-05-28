@@ -158,6 +158,62 @@ test("/api/nl send can target a session by list position", async () => {
   assert.deepEqual(saved, [{ sessionId: "session-2", lines: 30, text: "sent output" }]);
 });
 
+test("/api/nl output can target a session by list position", async () => {
+  const sessions = [
+    { id: "session-1", name: "first", kind: "codex", status: "running", cwd: "/one", tmuxSessionName: "session-1" },
+    { id: "session-2", name: "second", kind: "codex", status: "running", cwd: "/two", tmuxSessionName: "session-2" },
+    { id: "session-3", name: "third", kind: "codex", status: "running", cwd: "/three", tmuxSessionName: "session-3" }
+  ];
+  const saved = [];
+  const store = {
+    list() {
+      return sessions;
+    },
+    saveOutput(sessionId, lines, text) {
+      saved.push({ sessionId, lines, text });
+    },
+    findByIdOrName() {
+      throw new Error("current session should not be used for targetIndex output");
+    }
+  };
+  const captures = [];
+  const tmux = {
+    async capture(record, lines) {
+      captures.push({ sessionId: record.id, lines });
+      return "third output";
+    }
+  };
+
+  const { statusCode, body } = await postJson("/api/nl", {
+    text: "查看第三个会话",
+    currentSessionId: "session-1"
+  }, {
+    config: {
+      authToken: "secret",
+      allowRuntimeMode: true,
+      runtimeSettings: {},
+      runtimeSettingsEnabled: false
+    },
+    store,
+    tmux
+  });
+
+  assert.equal(statusCode, 200);
+  assert.deepEqual(JSON.parse(body), {
+    command: {
+      type: "output",
+      target: null,
+      targetIndex: 3,
+      lines: 50,
+      needsCurrentSession: false
+    },
+    session: sessions[2],
+    output: "third output"
+  });
+  assert.deepEqual(captures, [{ sessionId: "session-3", lines: 50 }]);
+  assert.deepEqual(saved, [{ sessionId: "session-3", lines: 50, text: "third output" }]);
+});
+
 test("/api/nl send can target a named session through the submitting send path", async () => {
   const glassSession = {
     id: "session-glass",
@@ -301,6 +357,212 @@ test("/api/nl send waits before returning 30 lines of current session output", a
   assert.deepEqual(saved, [{ sessionId: "session-main", lines: 30, text: "after send" }]);
 });
 
+test("/api/sessions/:id/input records previous final answer before sending new instruction", async () => {
+  const session = {
+    id: "session-main",
+    name: "main",
+    kind: "codex",
+    status: "running",
+    cwd: "/workspace/main",
+    tmuxSessionName: "main"
+  };
+  const calls = [];
+  const store = {
+    findByIdOrName(value) {
+      return value === session.id || value === session.name ? session : null;
+    },
+    saveInput(sessionId, text) {
+      calls.push({ type: "saveInput", sessionId, text });
+    },
+    touch(sessionId) {
+      calls.push({ type: "touch", sessionId });
+    }
+  };
+  const tmux = {
+    async send(record, text) {
+      calls.push({ type: "send", sessionId: record.id, text });
+    }
+  };
+  const sessionRecorder = {
+    async recordBeforeInput(record, text) {
+      calls.push({ type: "record", sessionId: record.id, text });
+    }
+  };
+
+  const { statusCode, body } = await postJson(
+    "/api/sessions/session-main/input",
+    { text: "继续实现" },
+    {
+      config: {
+        authToken: "secret",
+        allowRuntimeMode: true,
+        runtimeSettings: {},
+        runtimeSettingsEnabled: false
+      },
+      store,
+      tmux,
+      sessionRecorder
+    }
+  );
+
+  assert.equal(statusCode, 200);
+  assert.deepEqual(JSON.parse(body), { ok: true });
+  assert.deepEqual(calls, [
+    { type: "record", sessionId: "session-main", text: "继续实现" },
+    { type: "send", sessionId: "session-main", text: "继续实现" },
+    { type: "saveInput", sessionId: "session-main", text: "继续实现" },
+    { type: "touch", sessionId: "session-main" }
+  ]);
+});
+
+test("/api/sessions marks sessions that are waiting for confirmation", async () => {
+  const sessions = [
+    { id: "session-1", name: "needs-allow", kind: "codex", status: "running", cwd: "/one", tmuxSessionName: "one" },
+    { id: "session-2", name: "working", kind: "codex", status: "running", cwd: "/two", tmuxSessionName: "two" },
+    { id: "session-3", name: "done", kind: "runtime", status: "stopped", cwd: "/three", tmuxSessionName: "three" }
+  ];
+  const saved = [];
+  const store = {
+    list() {
+      return sessions;
+    },
+    updateStatus() {},
+    latestOutputSnapshot() {
+      return null;
+    },
+    saveOutput(sessionId, lines, text) {
+      saved.push({ sessionId, lines, text });
+    }
+  };
+  const tmux = {
+    async exists(record) {
+      return record.status === "running";
+    },
+    async capture(record) {
+      return record.id === "session-1" ? "allow?YES?\n1) yes\n2) no" : "still working";
+    }
+  };
+
+  const { statusCode, body } = await getJson("/api/sessions", {
+    config: {
+      authToken: "secret",
+      allowRuntimeMode: true,
+      runtimeSettings: {},
+      runtimeSettingsEnabled: false
+    },
+    store,
+    tmux
+  });
+
+  assert.equal(statusCode, 200);
+  const parsed = JSON.parse(body);
+  assert.deepEqual(
+    parsed.sessions.map((session) => ({ name: session.name, taskState: session.taskState })),
+    [
+      { name: "needs-allow", taskState: "needs_confirmation" },
+      { name: "working", taskState: "in_progress" },
+      { name: "done", taskState: "completed" }
+    ]
+  );
+  assert.deepEqual(saved, [
+    { sessionId: "session-1", lines: 80, text: "allow?YES?\n1) yes\n2) no" },
+    { sessionId: "session-2", lines: 80, text: "still working" }
+  ]);
+});
+
+test("/api/sessions recognizes allow variants in the latest 10 non-empty lines", async () => {
+  const sessions = [
+    { id: "session-1", name: "allow-dot", kind: "codex", status: "running", cwd: "/one", tmuxSessionName: "one" }
+  ];
+  const store = {
+    list() {
+      return sessions;
+    },
+    updateStatus() {},
+    latestOutputSnapshot() {
+      return null;
+    },
+    saveOutput() {}
+  };
+  const tmux = {
+    async exists() {
+      return true;
+    },
+    async capture() {
+      return [
+        "older line outside window",
+        "padding 1",
+        "padding 2",
+        "padding 3",
+        "padding 4",
+        "padding 5",
+        "padding 6",
+        "padding 7",
+        "padding 8",
+        "1.Allow",
+        "2.Allow once",
+        "3.Allow allways"
+      ].join("\n");
+    }
+  };
+
+  const { statusCode, body } = await getJson("/api/sessions", {
+    config: {
+      authToken: "secret",
+      allowRuntimeMode: true,
+      runtimeSettings: {},
+      runtimeSettingsEnabled: false
+    },
+    store,
+    tmux
+  });
+
+  assert.equal(statusCode, 200);
+  assert.equal(JSON.parse(body).sessions[0].taskState, "needs_confirmation");
+});
+
+test("/api/sessions recognizes opencode permission footer", async () => {
+  const sessions = [
+    { id: "session-1", name: "opencode-allow", kind: "opencode", status: "running", cwd: "/one", tmuxSessionName: "one" }
+  ];
+  const store = {
+    list() {
+      return sessions;
+    },
+    updateStatus() {},
+    latestOutputSnapshot() {
+      return null;
+    },
+    saveOutput() {}
+  };
+  const tmux = {
+    async exists() {
+      return true;
+    },
+    async capture() {
+      return [
+        "△ Permission required",
+        "← Access external directory ~/.config/opencode",
+        "Allow once   Allow always   Reject  ctrl+f fullscreen  ⇆ select  enter confirm"
+      ].join("\n");
+    }
+  };
+
+  const { statusCode, body } = await getJson("/api/sessions", {
+    config: {
+      authToken: "secret",
+      allowRuntimeMode: true,
+      runtimeSettings: {},
+      runtimeSettingsEnabled: false
+    },
+    store,
+    tmux
+  });
+
+  assert.equal(statusCode, 200);
+  assert.equal(JSON.parse(body).sessions[0].taskState, "needs_confirmation");
+});
+
 test("/api/nl switch can target a session by list position", async () => {
   const sessions = [
     { id: "session-1", name: "first", kind: "codex", status: "running", cwd: "/one", tmuxSessionName: "session-1" },
@@ -428,6 +690,49 @@ test("/api/nl create applies non-docker text hints after command parsing", async
   assert.equal(records[0].cwd, parsed.session.cwd);
 });
 
+test("/api/nl rejects AI parser create guesses without explicit create intent", async () => {
+  const records = [];
+  const context = createCreateSessionContext({ records });
+  context.config.runtimeSettings = {
+    commandParser: {
+      enabled: true,
+      baseUrl: "http://parser.test/v1",
+      model: "parser"
+    }
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    async json() {
+      return {
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                type: "create",
+                input: { kind: "codex", name: "guessed-window", project: null }
+              })
+            }
+          }
+        ]
+      };
+    }
+  });
+
+  try {
+    const { statusCode, body } = await postJson("/api/nl", {
+      text: "整理一下当前项目结构",
+      currentSessionId: "session-main"
+    }, context);
+
+    assert.equal(statusCode, 400);
+    assert.match(JSON.parse(body).error, /explicit create-session request/);
+    assert.equal(records.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("/api/sessions rejects runtime session when allowRuntimeMode is false", async () => {
   const records = [];
   const context = createCreateSessionContext({ records });
@@ -522,6 +827,32 @@ function createCreateSessionContext({ cwdMode, records }) {
 async function postJson(url, payload, context) {
   const req = Readable.from([JSON.stringify(payload)]);
   req.method = "POST";
+  req.url = url;
+  req.headers = {
+    host: "localhost",
+    authorization: "Bearer secret"
+  };
+  req.socket = { remoteAddress: "127.0.0.1" };
+  const res = {
+    statusCode: null,
+    headers: null,
+    body: "",
+    writeHead(statusCode, headers) {
+      this.statusCode = statusCode;
+      this.headers = headers;
+    },
+    end(body = "") {
+      this.body = String(body);
+    }
+  };
+
+  await handleSessionGatewayRequest(req, res, context);
+  return res;
+}
+
+async function getJson(url, context) {
+  const req = Readable.from([]);
+  req.method = "GET";
   req.url = url;
   req.headers = {
     host: "localhost",

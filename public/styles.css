@@ -15,6 +15,7 @@
   --placeholder: #718196;
   --primary: #2f81f7;
   --success: #2ea043;
+  --warning: #d29922;
   --danger: #d73a49;
   --shadow: rgba(0, 0, 0, 0.36);
   background: var(--page);
@@ -36,6 +37,7 @@
   --placeholder: #8a96a6;
   --primary: #1f6feb;
   --success: #1a7f37;
+  --warning: #9a6700;
   --danger: #cf222e;
   --shadow: rgba(15, 23, 32, 0.16);
 }
@@ -128,6 +130,19 @@ input::placeholder {
 .topbar-check input {
   min-height: 0;
   width: auto;
+}
+
+.confirm-alert {
+  background: color-mix(in srgb, var(--warning) 18%, var(--panel-2));
+  border-color: var(--warning);
+  color: var(--text-strong);
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 700;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 h1,
@@ -310,7 +325,8 @@ h2 {
   padding: 0 8px;
 }
 
-.session-status {
+.session-status,
+.task-state {
   border: 1px solid currentColor;
   border-radius: 999px;
   font-size: 11px;
@@ -327,6 +343,18 @@ h2 {
 
 .session-status.stopped {
   color: var(--danger);
+}
+
+.task-state.completed {
+  color: var(--success);
+}
+
+.task-state.in-progress {
+  color: var(--primary);
+}
+
+.task-state.needs-confirmation {
+  color: var(--warning);
 }
 
 .session-meta {

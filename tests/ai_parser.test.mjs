@@ -42,6 +42,7 @@ test("commandManual documents fixed actions and output format", () => {
   assert.match(manual, /Allowed type values: create, list, send, output, switch, stop, restart, help/);
   assert.match(manual, /查询会话列表/);
   assert.match(manual, /查看绘画/);
+  assert.match(manual, /查看第二个会话/);
   assert.match(manual, /发送xxx/);
   assert.match(manual, /发送到web-ai-agent会话xxx/);
   assert.match(manual, /targetIndex to 5/);
@@ -133,6 +134,13 @@ test("validateAiCommand normalizes safe output commands", () => {
     target: null,
     lines: 50,
     needsCurrentSession: true
+  });
+  assert.deepEqual(validateAiCommand({ type: "output", target: null, targetIndex: 3 }), {
+    type: "output",
+    target: null,
+    targetIndex: 3,
+    lines: 50,
+    needsCurrentSession: false
   });
 });
 
