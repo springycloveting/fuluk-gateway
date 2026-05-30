@@ -344,3 +344,30 @@ test("parses English command aliases", () => {
     target: "codex-app"
   });
 });
+
+test("handles homophone variants for 会话", () => {
+  assert.deepEqual(parseNaturalCommand("绘画列表"), { type: "list", runningOnly: false });
+  assert.deepEqual(parseNaturalCommand("绘话列表"), { type: "list", runningOnly: false });
+  assert.deepEqual(parseNaturalCommand("新建一个codex绘画，目录/workspace/app"), {
+    type: "create",
+    input: {
+      kind: "codex",
+      cwd: "/workspace/app",
+      name: undefined,
+      project: null
+    }
+  });
+  assert.deepEqual(parseNaturalCommand("列出所有绘话"), { type: "list", runningOnly: false });
+});
+
+test("handles homophone variants for other commands", () => {
+  assert.deepEqual(parseNaturalCommand("云行中的绘画"), { type: "list", runningOnly: true });
+  assert.deepEqual(parseNaturalCommand("庭止codex-app"), {
+    type: "stop",
+    target: "codex-app"
+  });
+  assert.deepEqual(parseNaturalCommand("虫启codex-app"), {
+    type: "restart",
+    target: "codex-app"
+  });
+});

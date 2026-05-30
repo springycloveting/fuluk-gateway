@@ -162,10 +162,35 @@ export function parseNaturalCommand(text) {
   throw new Error("Unsupported natural-language command");
 }
 
+const HOMOPHONE_MAP = {
+  会话: ["绘画", "绘话", "回话", "汇话", "会画", "会化", "惠话", "慧话"],
+  列表: ["列表", "烈表", "列biao"],
+  列出: ["列出", "烈出"],
+  查询: ["查询", "插询", "差询"],
+  查看: ["查看", "茶看", "插看"],
+  运行: ["运行", "云行", "允行"],
+  创建: ["创建", "床建", "创贱"],
+  新建: ["新建", "心建", "新见"],
+  停止: ["停止", "庭止", "亭止"],
+  重启: ["重启", "虫启", "冲启"],
+  发送: ["发送", "法送", "发诵"],
+  进入: ["进入", "经入", "近入"],
+  切换: ["切换", "且换", "窃换"]
+};
+
+const HOMOPHONE_REPLACEMENTS = [];
+for (const [correct, variants] of Object.entries(HOMOPHONE_MAP)) {
+  for (const variant of variants) {
+    HOMOPHONE_REPLACEMENTS.push({ pattern: new RegExp(variant, "gu"), replacement: correct });
+  }
+}
+
 function normalizeCommandText(value) {
-  return value
-    .replace(/[绘回对]画/gu, "会话")
-    .replace(/[绘回对]话/gu, "会话");
+  let normalized = value;
+  for (const { pattern, replacement } of HOMOPHONE_REPLACEMENTS) {
+    normalized = normalized.replace(pattern, replacement);
+  }
+  return normalized.replace(/[绘回对]画/gu, "会话").replace(/[绘回对]话/gu, "会话");
 }
 
 function normalizeKind(value) {
