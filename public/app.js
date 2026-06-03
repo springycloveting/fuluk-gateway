@@ -1,5 +1,8 @@
 const state = {
   sessions: [],
+  rooms: [],
+  rolePresets: [],
+  selectedRoomId: localStorage.getItem("sessionGatewaySelectedRoomId") || "",
   selected: null,
   outputLoading: false,
   outputLoadingSessionId: null,
@@ -21,6 +24,7 @@ const state = {
 };
 
 const OUTPUT_POLL_DELAYS_MS = [1000, 2000, 5000, 10000];
+const UNASSIGNED_ROOM_FILTER = "__unassigned__";
 
 const translations = {
   zh: {
@@ -50,6 +54,17 @@ const translations = {
     configTitle: "配置",
     sessionsTitle: "会话",
     createTitle: "新建会话",
+    roomCreateTitle: "新建房间",
+    roomAssignment: "房间",
+    assignRoleTitle: "分配角色",
+    allRooms: "全部会话",
+    unassignedSessions: "独立会话",
+    noRoom: "不关联房间",
+    noPreset: "自定义角色",
+    newRoom: "新房间",
+    joinRoom: "房间",
+    rolePrompt: "输入该会话在房间里的角色",
+    injectRolePrompt: "发送角色说明到会话",
     commandTitle: "助手",
     deleteTitle: "删除会话",
     historyTitle: "输入历史",
@@ -77,6 +92,9 @@ const translations = {
     namePlaceholder: "会话名，例如 codex-app",
     cwdPlaceholder: "工作目录，留空则使用默认会话目录",
     projectPlaceholder: "项目名",
+    rolePlaceholder: "角色，例如 reviewer",
+    roomNamePlaceholder: "房间名，例如 frontend-redesign",
+    roomObjectivePlaceholder: "目标",
     nlPlaceholder: "问 web-pi，例如：查看并总结当前会话。"
   },
   en: {
@@ -106,6 +124,17 @@ const translations = {
     configTitle: "Config",
     sessionsTitle: "Sessions",
     createTitle: "Create Session",
+    roomCreateTitle: "Create Room",
+    roomAssignment: "Room",
+    assignRoleTitle: "Assign Role",
+    allRooms: "All sessions",
+    unassignedSessions: "Standalone sessions",
+    noRoom: "No room",
+    noPreset: "Custom role",
+    newRoom: "New room",
+    joinRoom: "Room",
+    rolePrompt: "Role for this session in the room",
+    injectRolePrompt: "Send role prompt to session",
     commandTitle: "Assistant",
     deleteTitle: "Delete Session",
     historyTitle: "Input History",
@@ -133,6 +162,9 @@ const translations = {
     namePlaceholder: "Session name, e.g. codex-app",
     cwdPlaceholder: "Working directory; leave blank for the default session folder",
     projectPlaceholder: "Project",
+    rolePlaceholder: "Role, e.g. reviewer",
+    roomNamePlaceholder: "Room name, e.g. frontend-redesign",
+    roomObjectivePlaceholder: "Objective",
     nlPlaceholder: "Ask web-pi, e.g. summarize the current session."
   }
 };
@@ -143,6 +175,13 @@ const els = {
   closeSessions: document.querySelector("#close-sessions"),
   sessionsTitle: document.querySelector("[data-i18n='sessionsTitle']"),
   sessionsPanel: document.querySelector("#sessions-panel"),
+  roomFilter: document.querySelector("#room-filter"),
+  openRoomCreate: document.querySelector("#open-room-create"),
+  roomCreateDialog: document.querySelector("#room-create-dialog"),
+  roomCreateForm: document.querySelector("#room-create-form"),
+  roomName: document.querySelector("#room-name"),
+  roomProject: document.querySelector("#room-project"),
+  roomObjective: document.querySelector("#room-objective"),
   openConfig: document.querySelector("#open-config"),
   configDialog: document.querySelector("#config-dialog"),
   configForm: document.querySelector("#config-form"),
@@ -180,6 +219,16 @@ const els = {
   name: document.querySelector("#name"),
   cwd: document.querySelector("#cwd"),
   project: document.querySelector("#project"),
+  createRoom: document.querySelector("#create-room"),
+  createRolePreset: document.querySelector("#create-role-preset"),
+  createRole: document.querySelector("#create-role"),
+  assignRoleDialog: document.querySelector("#assign-role-dialog"),
+  assignRoleForm: document.querySelector("#assign-role-form"),
+  assignSessionId: document.querySelector("#assign-session-id"),
+  assignRoom: document.querySelector("#assign-room"),
+  assignRolePreset: document.querySelector("#assign-role-preset"),
+  assignRole: document.querySelector("#assign-role"),
+  assignInjectPrompt: document.querySelector("#assign-inject-prompt"),
   create: document.querySelector("#create"),
   nl: document.querySelector("#nl"),
   runNl: document.querySelector("#run-nl"),
@@ -258,6 +307,22 @@ document.querySelectorAll("[data-close-dialog]").forEach((button) => {
   });
 });
 els.refresh.addEventListener("click", refreshSessions);
+els.roomFilter.addEventListener("change", () => {
+  state.selectedRoomId = els.roomFilter.value;
+  localStorage.setItem("sessionGatewaySelectedRoomId", state.selectedRoomId);
+  renderSessions();
+});
+els.openRoomCreate.addEventListener("click", () => {
+  els.roomName.value = "";
+  els.roomProject.value = els.project.value || selectedRoom()?.project || "";
+  els.roomObjective.value = "";
+  els.roomCreateDialog.showModal();
+  els.roomName.focus();
+});
+els.roomCreateForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  createRoom();
+});
 els.configForm.addEventListener("submit", (event) => {
   event.preventDefault();
   saveConfig();
@@ -265,6 +330,19 @@ els.configForm.addEventListener("submit", (event) => {
 els.createForm.addEventListener("submit", (event) => {
   event.preventDefault();
   createSession();
+});
+els.createRolePreset.addEventListener("change", () => {
+  applySelectedPresetToRole(els.createRolePreset, els.createRole);
+});
+els.assignRolePreset.addEventListener("change", () => {
+  applySelectedPresetToRole(els.assignRolePreset, els.assignRole);
+});
+els.assignRoom.addEventListener("change", () => {
+  applySelectedAssignRoom();
+});
+els.assignRoleForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  assignRoleFromDialog();
 });
 els.kind.addEventListener("change", () => {
   delete els.createDeploymentMode.dataset.touched;
@@ -317,6 +395,8 @@ document.addEventListener("visibilitychange", () => {
 applyLanguage();
 applyTheme();
 await loadConfig();
+await loadRolePresets();
+await loadRooms();
 updateCreateDeploymentControls();
 await refreshSessions();
 renderQuickKeys();
@@ -422,12 +502,104 @@ function applyAiParserVisibility() {
   }
 }
 
+async function loadRooms() {
+  try {
+    const data = await api("/api/rooms");
+    state.rooms = data.rooms ?? [];
+    if (
+      state.selectedRoomId &&
+      state.selectedRoomId !== UNASSIGNED_ROOM_FILTER &&
+      !state.rooms.some((room) => room.id === state.selectedRoomId)
+    ) {
+      state.selectedRoomId = "";
+      localStorage.setItem("sessionGatewaySelectedRoomId", "");
+    }
+    renderRoomControls();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function createRoom() {
+  try {
+    const body = {
+      name: els.roomName.value,
+      project: els.roomProject.value || undefined,
+      objective: els.roomObjective.value || undefined
+    };
+    const data = await api("/api/rooms", {
+      method: "POST",
+      body: JSON.stringify(body)
+    });
+    state.rooms = [data.room, ...state.rooms.filter((room) => room.id !== data.room.id)];
+    state.selectedRoomId = data.room.id;
+    localStorage.setItem("sessionGatewaySelectedRoomId", state.selectedRoomId);
+    els.roomCreateDialog.close();
+    renderRoomControls();
+    renderSessions();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+function renderRoomControls() {
+  const roomOptions = [
+    `<option value="">${escapeHtml(t("allRooms"))}</option>`,
+    `<option value="${UNASSIGNED_ROOM_FILTER}">${escapeHtml(t("unassignedSessions"))}</option>`,
+    ...state.rooms.map((room) => `<option value="${escapeHtml(room.id)}">${escapeHtml(room.name)}</option>`)
+  ].join("");
+  els.roomFilter.innerHTML = roomOptions;
+  els.roomFilter.value = state.selectedRoomId;
+
+  els.createRoom.innerHTML = [
+    `<option value="">${escapeHtml(t("noRoom"))}</option>`,
+    ...state.rooms.map((room) => `<option value="${escapeHtml(room.id)}">${escapeHtml(room.name)}</option>`)
+  ].join("");
+  els.createRoom.value = selectedRealRoomId();
+
+  els.assignRoom.innerHTML = state.rooms
+    .map((room) => `<option value="${escapeHtml(room.id)}">${escapeHtml(room.name)}</option>`)
+    .join("");
+}
+
+async function loadRolePresets() {
+  try {
+    const data = await api("/api/role-presets");
+    state.rolePresets = data.rolePresets ?? [];
+    renderRolePresetControls();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+function renderRolePresetControls() {
+  const options = [
+    `<option value="">${escapeHtml(t("noPreset"))}</option>`,
+    ...state.rolePresets.map((preset) => (
+      `<option value="${escapeHtml(preset.id)}" title="${escapeHtml(preset.description ?? "")}">${escapeHtml(preset.label || preset.name)}</option>`
+    ))
+  ].join("");
+  els.createRolePreset.innerHTML = options;
+  els.assignRolePreset.innerHTML = options;
+}
+
+function applySelectedPresetToRole(select, input) {
+  const preset = state.rolePresets.find((item) => item.id === select.value);
+  if (!preset) return;
+  input.value = preset.label || preset.name;
+  if (select === els.createRolePreset && preset.defaultKind) {
+    els.kind.value = preset.defaultKind;
+    updateCreateDeploymentControls();
+  }
+}
+
 async function refreshSessions() {
   if (state.sessionLoading) return;
   state.sessionLoading = true;
   try {
     const data = await api("/api/sessions");
     state.sessions = data.sessions;
+    await loadRooms();
     if (state.selected) {
       const current = state.sessions.find((session) => session.id === state.selected.id);
       state.selected = current || null;
@@ -471,6 +643,9 @@ async function createSession() {
       name: els.name.value || undefined,
       cwd: els.cwd.value,
       project: els.project.value || undefined,
+      roomId: els.createRoom.value || undefined,
+      rolePresetId: els.createRolePreset.value || undefined,
+      role: els.createRole.value || undefined,
       deploymentMode: els.kind.value === "runtime" ? undefined : els.createDeploymentMode.value,
       dockerName:
         els.kind.value !== "runtime" && els.createDeploymentMode.value === "docker"
@@ -484,6 +659,8 @@ async function createSession() {
     state.selected = data.session;
     clearOutputEtag(state.selected.id);
     els.createDialog.close();
+    els.createRolePreset.value = "";
+    els.createRole.value = "";
     await refreshSessions();
   } catch (error) {
     showError(error);
@@ -855,7 +1032,9 @@ function loadCustomQuickKeys() {
 
 function renderSessions() {
   els.list.innerHTML = "";
-  for (const session of state.sessions) {
+  const sessions = filteredSessions();
+  for (const session of sessions) {
+    const membership = selectedRoomMembership(session);
     const item = document.createElement("button");
     item.className = `session-item${state.selected?.id === session.id ? " active" : ""}`;
     item.type = "button";
@@ -866,12 +1045,17 @@ function renderSessions() {
           <span class="task-state ${taskStateClass(session.taskState)}">${escapeHtml(
             taskStateLabel(session)
           )}</span>
+          <button class="session-assign" type="button" title="${escapeHtml(t("joinRoom"))}">${escapeHtml(t("joinRoom"))}</button>
           <button class="session-delete" type="button" title="${escapeHtml(t("delete"))}">${escapeHtml(t("delete"))}</button>
         </span>
       </span>
-      <span class="session-meta">${escapeHtml(sessionStatusLabel(session))} · ${escapeHtml(session.kind)} · ${escapeHtml(sessionDeploymentLabel(session))} · ${escapeHtml(session.cwd)}</span>
+      <span class="session-meta">${escapeHtml(sessionStatusLabel(session))} · ${escapeHtml(session.kind)} · ${escapeHtml(sessionDeploymentLabel(session))}${membership?.role ? ` · ${escapeHtml(membership.role)}` : ""} · ${escapeHtml(session.cwd)}</span>
     `;
     item.addEventListener("click", () => selectSession(session));
+    item.querySelector(".session-assign")?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      assignSessionToSelectedRoom(session);
+    });
     item.querySelector(".session-delete").addEventListener("click", (event) => {
       event.stopPropagation();
       openDeleteDialog(session);
@@ -879,8 +1063,83 @@ function renderSessions() {
     els.list.append(item);
   }
 
-  if (!state.sessions.length) {
+  if (!sessions.length) {
     els.list.textContent = "No sessions.";
+  }
+}
+
+function filteredSessions() {
+  if (state.selectedRoomId === UNASSIGNED_ROOM_FILTER) {
+    return state.sessions.filter((session) => !(session.rooms ?? []).length);
+  }
+  if (state.selectedRoomId) {
+    return state.sessions.filter((session) => sessionHasRoom(session, state.selectedRoomId));
+  }
+  return state.sessions;
+}
+
+function sessionHasRoom(session, roomId) {
+  return (session.rooms ?? []).some((room) => room.roomId === roomId);
+}
+
+function selectedRoomMembership(session) {
+  return sessionRoomMembership(session, state.selectedRoomId);
+}
+
+function sessionRoomMembership(session, roomId) {
+  if (!roomId) return null;
+  return (session.rooms ?? []).find((room) => room.roomId === roomId) ?? null;
+}
+
+function selectedRoom() {
+  return state.rooms.find((room) => room.id === selectedRealRoomId()) ?? null;
+}
+
+function selectedRealRoomId() {
+  return state.selectedRoomId === UNASSIGNED_ROOM_FILTER ? "" : state.selectedRoomId;
+}
+
+async function assignSessionToSelectedRoom(session) {
+  if (!state.rooms.length) {
+    showError(new Error(t("noRoom")));
+    return;
+  }
+  const roomId = selectedRealRoomId() || session.rooms?.[0]?.roomId || state.rooms[0].id;
+  const membership = sessionRoomMembership(session, roomId);
+  els.assignSessionId.value = session.id;
+  els.assignRoom.value = roomId;
+  els.assignRolePreset.value = membership?.rolePresetId || "";
+  els.assignRole.value = membership?.role || "";
+  els.assignInjectPrompt.checked = false;
+  els.assignRoleDialog.showModal();
+  els.assignRoom.focus();
+}
+
+function applySelectedAssignRoom() {
+  const session = state.sessions.find((item) => item.id === els.assignSessionId.value);
+  if (!session) return;
+  const membership = sessionRoomMembership(session, els.assignRoom.value);
+  els.assignRolePreset.value = membership?.rolePresetId || "";
+  els.assignRole.value = membership?.role || "";
+}
+
+async function assignRoleFromDialog() {
+  const roomId = els.assignRoom.value;
+  if (!roomId || !els.assignSessionId.value) return;
+  try {
+    await api(`/api/rooms/${encodeURIComponent(roomId)}/sessions`, {
+      method: "POST",
+      body: JSON.stringify({
+        sessionId: els.assignSessionId.value,
+        rolePresetId: els.assignRolePreset.value || undefined,
+        role: els.assignRole.value || undefined,
+        injectRolePrompt: els.assignInjectPrompt.checked
+      })
+    });
+    els.assignRoleDialog.close();
+    await refreshSessions();
+  } catch (error) {
+    showError(error);
   }
 }
 
@@ -1053,6 +1312,7 @@ function applyLanguage() {
   renderTaskAlert();
   els.openCreate.textContent = text.create;
   els.openRun.textContent = text.command;
+  els.openRoomCreate.textContent = text.newRoom;
   els.restart.textContent = text.restart;
   els.stop.textContent = text.stop;
   els.openConfig.textContent = text.config;
@@ -1067,7 +1327,14 @@ function applyLanguage() {
   els.name.placeholder = text.namePlaceholder;
   els.cwd.placeholder = text.cwdPlaceholder;
   els.project.placeholder = text.projectPlaceholder;
+  els.createRole.placeholder = text.rolePlaceholder;
+  els.assignRole.placeholder = text.rolePlaceholder;
+  els.roomName.placeholder = text.roomNamePlaceholder;
+  els.roomProject.placeholder = text.projectPlaceholder;
+  els.roomObjective.placeholder = text.roomObjectivePlaceholder;
   els.nl.placeholder = text.nlPlaceholder;
+  renderRoomControls();
+  renderRolePresetControls();
   renderAssistantMessages();
   if (!state.selected) els.title.textContent = text.noSession;
 }

@@ -137,7 +137,26 @@ async function handleApi(req, res, url, context) {
     const body = await readJsonBody(req);
     const input = parseCreateInput(body, context);
     const session = await createSession(input, context);
-    sendJson(res, 201, { session });
+    const membership = await assignCreatedSessionToRoom(session, body, context);
+    if (membership) await injectRolePromptIfRequested(session, membership, body, context, { defaultEnabled: true });
+    sendJson(res, 201, { session: membership ? store.findByIdOrName(session.id) : session, membership });
+    return;
+  }
+
+  if (method === "GET" && pathname === "/api/role-presets") {
+    sendJson(res, 200, { rolePresets: store.listRolePresets() });
+    return;
+  }
+
+  if (method === "GET" && pathname === "/api/rooms") {
+    sendJson(res, 200, { rooms: store.listRooms() });
+    return;
+  }
+
+  if (method === "POST" && pathname === "/api/rooms") {
+    const body = await readJsonBody(req);
+    const room = store.createRoom(parseRoomInput(body));
+    sendJson(res, 201, { room });
     return;
   }
 
@@ -166,11 +185,54 @@ async function handleApi(req, res, url, context) {
     return;
   }
 
+  const roomRoute = pathname.match(/^\/api\/rooms\/([^/]+)(?:\/([^/]+))?$/);
+  if (roomRoute) {
+    const roomId = decodeURIComponent(roomRoute[1]);
+    const action = roomRoute[2] ?? "";
+    await handleRoomAction(req, res, method, roomId, action, context);
+    return;
+  }
+
   const sessionRoute = pathname.match(/^\/api\/sessions\/([^/]+)(?:\/([^/]+))?$/);
   if (sessionRoute) {
     const idOrName = decodeURIComponent(sessionRoute[1]);
     const action = sessionRoute[2] ?? "";
     await handleSessionAction(req, res, url, method, idOrName, action, context);
+    return;
+  }
+
+  sendJson(res, 404, { error: "Not found" });
+}
+
+async function handleRoomAction(req, res, method, roomId, action, context) {
+  const { store } = context;
+
+  if (method === "GET" && action === "") {
+    const room = store.getRoom(roomId);
+    if (!room) throw new Error(`Room not found: ${roomId}`);
+    sendJson(res, 200, { room });
+    return;
+  }
+
+  if (method === "POST" && action === "sessions") {
+    const body = await readJsonBody(req);
+    const room = store.getRoom(roomId);
+    if (!room) throw new Error(`Room not found: ${roomId}`);
+    const role = parseRole(body.role);
+
+    if (typeof body.sessionId === "string" && body.sessionId.trim()) {
+      const membership = store.assignSessionToRoom(room.id, body.sessionId.trim(), role, parseMembershipOptions(body));
+      const session = store.findByIdOrName(membership.sessionId);
+      if (session) await injectRolePromptIfRequested(session, membership, body, context, { defaultEnabled: false });
+      sendJson(res, 200, { room: store.getRoom(room.id), membership, session: store.findByIdOrName(membership.sessionId) });
+      return;
+    }
+
+    const input = parseCreateInput(body, context);
+    const session = await createSession(input, context);
+    const membership = store.assignSessionToRoom(room.id, session.id, role, parseMembershipOptions(body));
+    await injectRolePromptIfRequested(session, membership, body, context, { defaultEnabled: true });
+    sendJson(res, 201, { room: store.getRoom(room.id), membership, session: store.findByIdOrName(session.id) });
     return;
   }
 
@@ -818,6 +880,51 @@ function findExistingNamedSession(input, { store }) {
   if (!name) return null;
   const existing = store.findByIdOrName(name);
   return existing?.name === name ? existing : null;
+}
+
+function parseRoomInput(body) {
+  if (typeof body.name !== "string" || !body.name.trim()) throw new Error("room name is required");
+  return {
+    name: body.name,
+    objective: typeof body.objective === "string" ? body.objective : undefined,
+    project: typeof body.project === "string" ? body.project : undefined
+  };
+}
+
+function parseRole(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string") throw new Error("role must be a string");
+  return value.trim() || null;
+}
+
+function parseMembershipOptions(body) {
+  return {
+    rolePresetId: typeof body.rolePresetId === "string" && body.rolePresetId.trim() ? body.rolePresetId.trim() : null,
+    rolePrompt: typeof body.rolePrompt === "string" ? body.rolePrompt : undefined
+  };
+}
+
+async function assignCreatedSessionToRoom(session, body, { store }) {
+  const roomId = typeof body.roomId === "string" && body.roomId.trim() ? body.roomId.trim() : null;
+  if (!roomId) return null;
+  return store.assignSessionToRoom(roomId, session.id, parseRole(body.role), parseMembershipOptions(body));
+}
+
+async function injectRolePromptIfRequested(session, membership, body, context, { defaultEnabled }) {
+  const shouldInject = body.injectRolePrompt === undefined ? defaultEnabled : Boolean(body.injectRolePrompt);
+  if (!shouldInject || !membership?.rolePrompt) return;
+  const text = rolePromptMessage(membership);
+  await context.tmux.send(session, text);
+  saveInputIfSupported(context.store, session.id, text);
+  context.store.touch(session.id);
+}
+
+function rolePromptMessage(membership) {
+  return [
+    `You are assigned to room "${membership.roomName}" as "${membership.role ?? membership.rolePresetName ?? "agent"}".`,
+    "",
+    membership.rolePrompt
+  ].join("\n");
 }
 
 function parseCreateInput(body, context) {

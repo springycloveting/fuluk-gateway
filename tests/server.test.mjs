@@ -952,6 +952,138 @@ test("/api/sessions allows runtime session when allowRuntimeMode is true", async
   assert.equal(records[0].kind, "runtime");
 });
 
+test("/api/rooms creates rooms and associates existing sessions with roles", async () => {
+  const session = { id: "session-1", name: "builder", kind: "codex", status: "running", cwd: "/workspace" };
+  const memberships = [];
+  const room = {
+    id: "room-1",
+    name: "launch",
+    objective: "ship",
+    project: "site",
+    createdAt: "2026-06-02T00:00:00.000Z",
+    updatedAt: "2026-06-02T00:00:00.000Z",
+    sessions: []
+  };
+  const context = createCreateSessionContext({ records: [] });
+  context.store = {
+    listRooms() {
+      return [room];
+    },
+    createRoom(input) {
+      assert.deepEqual(input, { name: "launch", objective: "ship", project: "site" });
+      return room;
+    },
+    getRoom(id) {
+      return id === room.id ? { ...room, sessions: memberships } : null;
+    },
+    findByIdOrName(id) {
+      return id === session.id || id === session.name ? { ...session, rooms: memberships } : null;
+    },
+    assignSessionToRoom(roomId, sessionId, role) {
+      const membership = { roomId, roomName: room.name, sessionId, sessionName: session.name, role };
+      memberships.push(membership);
+      return membership;
+    }
+  };
+
+  const created = await postJson("/api/rooms", { name: "launch", objective: "ship", project: "site" }, context);
+  assert.equal(created.statusCode, 201);
+  assert.equal(JSON.parse(created.body).room.name, "launch");
+
+  const associated = await postJson("/api/rooms/room-1/sessions", { sessionId: "session-1", role: "reviewer" }, context);
+  assert.equal(associated.statusCode, 200);
+  const parsed = JSON.parse(associated.body);
+  assert.equal(parsed.membership.role, "reviewer");
+  assert.equal(parsed.session.rooms[0].roomName, "launch");
+});
+
+test("/api/sessions can create a session and attach it to a room role", async () => {
+  const records = [];
+  const memberships = [];
+  const context = createCreateSessionContext({ cwdMode: "host", records });
+  context.store.getRoom = (id) => (id === "room-1" ? { id: "room-1", name: "launch", sessions: [] } : null);
+  context.store.assignSessionToRoom = (roomId, sessionId, role) => {
+    const membership = { roomId, roomName: "launch", sessionId, sessionName: "planner", role };
+    memberships.push(membership);
+    return membership;
+  };
+
+  const { statusCode, body } = await postJson("/api/sessions", {
+    kind: "runtime",
+    name: "planner",
+    roomId: "room-1",
+    role: "planner"
+  }, context);
+
+  assert.equal(statusCode, 201);
+  const parsed = JSON.parse(body);
+  assert.equal(parsed.session.name, "planner");
+  assert.equal(parsed.membership.role, "planner");
+  assert.deepEqual(memberships, [
+    { roomId: "room-1", roomName: "launch", sessionId: "session-1", sessionName: "planner", role: "planner" }
+  ]);
+});
+
+test("/api/role-presets lists ECC role preset capability material", async () => {
+  const context = createCreateSessionContext({ records: [] });
+  context.store.listRolePresets = () => [
+    {
+      id: "ecc-code-reviewer",
+      name: "code-reviewer",
+      label: "代码审查员",
+      tools: ["Read", "Grep", "Glob", "Bash"],
+      skills: ["verification-loop"],
+      prompt: "You are a senior code reviewer.",
+      sourceUrl: "https://github.com/affaan-m/ECC/blob/main/agents/code-reviewer.md"
+    }
+  ];
+
+  const { statusCode, body } = await getJson("/api/role-presets", context);
+
+  assert.equal(statusCode, 200);
+  const presets = JSON.parse(body).rolePresets;
+  assert.equal(presets[0].name, "code-reviewer");
+  assert.equal(presets[0].label, "代码审查员");
+  assert.equal(presets[0].tools[3], "Bash");
+  assert.match(presets[0].prompt, /senior code reviewer/);
+});
+
+test("/api/sessions injects role preset prompt when creating a room session", async () => {
+  const records = [];
+  const calls = [];
+  const context = createCreateSessionContext({ cwdMode: "host", records });
+  context.store.getRoom = (id) => (id === "room-1" ? { id: "room-1", name: "review-room", sessions: [] } : null);
+  context.store.assignSessionToRoom = (roomId, sessionId, role, options) => ({
+    roomId,
+    roomName: "review-room",
+    sessionId,
+    sessionName: "reviewer",
+    role: role ?? "代码审查员",
+    rolePresetId: options.rolePresetId,
+    rolePresetName: "code-reviewer",
+    rolePresetLabel: "代码审查员",
+    rolePrompt: "You are a senior code reviewer."
+  });
+  context.store.saveInput = (sessionId, text) => calls.push({ type: "saveInput", sessionId, text });
+  context.store.touch = (sessionId) => calls.push({ type: "touch", sessionId });
+  context.tmux.send = async (session, text) => calls.push({ type: "send", sessionId: session.id, text });
+
+  const { statusCode, body } = await postJson("/api/sessions", {
+    kind: "runtime",
+    name: "reviewer",
+    roomId: "room-1",
+    rolePresetId: "ecc-code-reviewer"
+  }, context);
+
+  assert.equal(statusCode, 201);
+  const parsed = JSON.parse(body);
+  assert.equal(parsed.membership.rolePresetId, "ecc-code-reviewer");
+  assert.match(calls[0].text, /as "代码审查员"/);
+  assert.doesNotMatch(calls[0].text, /capability guidance|direct permissions/i);
+  assert.match(calls[0].text, /senior code reviewer/);
+  assert.deepEqual(calls.map((call) => call.type), ["send", "saveInput", "touch"]);
+});
+
 test("security headers are added to responses", async () => {
   const context = createCreateSessionContext({ records: [] });
   const { statusCode, headers } = await postJson("/api/sessions", { kind: "codex", name: "test" }, context);
@@ -1022,8 +1154,8 @@ function createCreateSessionContext({ cwdMode, records }) {
       runtimeSettingsEnabled: false
     },
     store: {
-      findByIdOrName() {
-        return null;
+      findByIdOrName(idOrName) {
+        return records.find((record) => record.id === idOrName || record.name === idOrName) ?? null;
       },
       create(input, command, commandArgs) {
         const record = {

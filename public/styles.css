@@ -113,6 +113,11 @@ input::placeholder {
   min-width: 0;
 }
 
+.actions select {
+  max-width: 150px;
+  min-height: 34px;
+}
+
 .topbar-check {
   align-items: center;
   border: 1px solid var(--border-strong);
@@ -320,6 +325,15 @@ h2 {
   background: transparent;
   border-color: var(--danger);
   color: var(--danger);
+  font-size: 11px;
+  min-height: 22px;
+  padding: 0 8px;
+}
+
+.session-assign {
+  background: transparent;
+  border-color: var(--primary);
+  color: var(--primary);
   font-size: 11px;
   min-height: 22px;
   padding: 0 8px;

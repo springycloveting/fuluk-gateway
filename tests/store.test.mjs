@@ -160,3 +160,45 @@ test("SessionStore can save background output without touching session order", a
   assert.equal(store.list()[0].id, newer.id);
   store.close();
 });
+
+test("SessionStore creates rooms and assigns sessions with roles", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-"));
+  const store = new SessionStore(path.join(dir, "test.sqlite"));
+
+  const session = store.create({ kind: "runtime", cwd: dir, name: "designer" }, "/bin/bash", []);
+  const room = store.createRoom({ name: "launch", project: "site", objective: "ship homepage" });
+  const membership = store.assignSessionToRoom(room.id, session.id, "reviewer");
+
+  assert.equal(membership.roomId, room.id);
+  assert.equal(membership.sessionId, session.id);
+  assert.equal(membership.role, "reviewer");
+  assert.equal(store.getRoom("launch").sessions[0].sessionName, "designer");
+  assert.equal(store.findByIdOrName("designer").rooms[0].roomName, "launch");
+
+  const updated = store.assignSessionToRoom(room.id, session.id, "implementer");
+  assert.equal(updated.role, "implementer");
+  assert.equal(store.listRooms()[0].sessions.length, 1);
+  store.close();
+});
+
+test("SessionStore seeds ECC role presets and stores preset prompts on room sessions", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-"));
+  const store = new SessionStore(path.join(dir, "test.sqlite"));
+
+  const preset = store.getRolePreset("code-reviewer");
+  assert.equal(preset.name, "code-reviewer");
+  assert.equal(preset.label, "代码审查员");
+  assert.equal(preset.sourceUrl, "https://github.com/affaan-m/ECC/blob/main/agents/code-reviewer.md");
+  assert.deepEqual(preset.tools, ["Read", "Grep", "Glob", "Bash"]);
+
+  const session = store.create({ kind: "runtime", cwd: dir, name: "reviewer" }, "/bin/bash", []);
+  const room = store.createRoom({ name: "review-room" });
+  const membership = store.assignSessionToRoom(room.id, session.id, null, { rolePresetId: preset.id });
+
+  assert.equal(membership.role, "代码审查员");
+  assert.equal(membership.rolePresetId, preset.id);
+  assert.equal(membership.rolePresetName, "code-reviewer");
+  assert.equal(membership.rolePresetLabel, "代码审查员");
+  assert.match(membership.rolePrompt, /senior code reviewer/i);
+  store.close();
+});
