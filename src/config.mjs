@@ -3,9 +3,9 @@ import fs from "node:fs";
 
 const CLI_KINDS = ["codex", "claude", "opencode", "pi-os"];
 const DEFAULT_CLI_DEPLOYMENT = {
-  codex: { mode: "docker", dockerName: "worker-codex" },
-  claude: { mode: "docker", dockerName: "worker-claude" },
-  opencode: { mode: "docker", dockerName: "worker-opencode" },
+  codex: { mode: "host", dockerName: "worker-codex" },
+  claude: { mode: "host", dockerName: "worker-claude" },
+  opencode: { mode: "host", dockerName: "worker-opencode" },
   "pi-os": { mode: "host", dockerName: "" }
 };
 
@@ -34,6 +34,7 @@ export function loadConfig() {
     defaultRuntimeCommand: process.env.SESSION_GATEWAY_RUNTIME ?? "/bin/bash",
     notificationPollMs: parsePositiveInt(process.env.SESSION_GATEWAY_NOTIFICATION_POLL_MS, 5_000),
     submitKeyDelayMs: parsePositiveInt(process.env.SESSION_GATEWAY_SUBMIT_KEY_DELAY_MS, 80),
+    cliStartupDelayMs: parsePositiveInt(process.env.SESSION_GATEWAY_CLI_STARTUP_DELAY_MS, 3000),
     submitKeys: {
       codex: process.env.SESSION_GATEWAY_CODEX_SUBMIT_KEY ?? "Enter",
       claude: process.env.SESSION_GATEWAY_CLAUDE_SUBMIT_KEY ?? "Enter",

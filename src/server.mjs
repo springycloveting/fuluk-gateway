@@ -19,6 +19,8 @@ const SEND_FOLLOWUP_DELAY_MS = 5_000;
 const SEND_FOLLOWUP_LINES = 30;
 const SESSION_LIST_OUTPUT_LINES = 80;
 const IDLE_OUTPUT_STOPPED_MS = 60_000;
+const ROOM_SUBMIT_KEY_DELAY_MIN_MS = 600;
+const ROOM_SUBMIT_KEY_DELAY_MAX_MS = 2_000;
 
 // Security headers for all responses
 const SECURITY_HEADERS = {
@@ -214,6 +216,29 @@ async function handleRoomAction(req, res, method, roomId, action, context) {
     return;
   }
 
+  if (method === "DELETE" && action === "") {
+    const room = store.getRoom(roomId);
+    if (!room) throw new Error(`Room not found: ${roomId}`);
+    store.deleteRoom(room.id);
+    context.eventHub?.broadcast({ type: "room_deleted", roomId: room.id });
+    sendJson(res, 200, { ok: true, roomId: room.id });
+    return;
+  }
+
+  if (method === "GET" && action === "messages") {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const limit = Math.min(500, Math.max(1, parseInt(url.searchParams.get("limit") || "100", 10) || 100));
+    sendJson(res, 200, { messages: store.listRoomMessages(roomId, limit) });
+    return;
+  }
+
+  if (method === "POST" && action === "messages") {
+    const body = await readJsonBody(req);
+    const result = await dispatchRoomMessage(roomId, body, context);
+    sendJson(res, 201, result);
+    return;
+  }
+
   if (method === "POST" && action === "sessions") {
     const body = await readJsonBody(req);
     const room = store.getRoom(roomId);
@@ -237,6 +262,151 @@ async function handleRoomAction(req, res, method, roomId, action, context) {
   }
 
   sendJson(res, 404, { error: "Not found" });
+}
+
+async function dispatchRoomMessage(roomId, body, context) {
+  const { store } = context;
+  const room = store.getRoom(roomId);
+  if (!room) throw new Error(`Room not found: ${roomId}`);
+  const target = parseRoomMessageTarget(body.target ?? body);
+  const fromSessionId = normalizeOptionalSessionId(body.fromSessionId);
+  const roomOnly = target.mode === "room" || body.metadata?.source === "agent-result";
+  const targets = roomOnly ? [] : resolveRoomMessageTargets(room, target, fromSessionId);
+  if (!roomOnly && !targets.length) throw new Error("No running room sessions match the message target");
+
+  const message = store.createRoomMessage({
+    roomId: room.id,
+    fromSessionId,
+    text: body.text,
+    targetMode: target.mode,
+    targetRole: target.role,
+    targetSessionIds: target.sessionIds,
+    metadata: body.metadata
+  });
+
+  if (roomOnly) {
+    const delivered = store.getRoomMessage(message.id);
+    context.eventHub?.broadcast({ type: "room_message_created", room: store.getRoom(room.id), message: delivered });
+    return { message: delivered };
+  }
+
+  for (const targetSession of targets) {
+    const delivery = store.addRoomMessageDelivery(message.id, targetSession.sessionId);
+    const session = store.findByIdOrName(targetSession.sessionId);
+    try {
+      const text = formatRoomMessageForSession(message, room, targetSession, context);
+      await context.tmux.send(session, text, { submitKeyDelayMs: roomSubmitKeyDelayMs(text, context.config) });
+      saveInputIfSupported(store, session.id, text);
+      store.touch(session.id);
+      store.updateRoomMessageDelivery(delivery.id, "sent");
+    } catch (error) {
+      store.updateRoomMessageDelivery(delivery.id, "failed", errorMessage(error));
+    }
+  }
+
+  const delivered = store.getRoomMessage(message.id);
+  context.eventHub?.broadcast({ type: "room_message_created", room: store.getRoom(room.id), message: delivered });
+  return { message: delivered };
+}
+
+function parseRoomMessageTarget(target) {
+  const mode = typeof target.mode === "string" && target.mode.trim() ? target.mode.trim() : "all";
+  if (!["all", "role", "session", "room"].includes(mode)) throw new Error("target mode must be all, role, session, or room");
+  const role = typeof target.role === "string" && target.role.trim() ? target.role.trim() : null;
+  const sessionIds = Array.isArray(target.sessionIds)
+    ? target.sessionIds.filter((id) => typeof id === "string" && id.trim()).map((id) => id.trim())
+    : typeof target.sessionId === "string" && target.sessionId.trim()
+      ? [target.sessionId.trim()]
+      : [];
+  if (mode === "role" && !role) throw new Error("target role is required");
+  if (mode === "session" && !sessionIds.length) throw new Error("target sessionIds are required");
+  return { mode, role, sessionIds };
+}
+
+function normalizeOptionalSessionId(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function resolveRoomMessageTargets(room, target, fromSessionId) {
+  const memberships = (room.sessions ?? []).filter((membership) => membership.sessionStatus === "running");
+  const selected = memberships.filter((membership) => {
+    if (fromSessionId && membership.sessionId === fromSessionId) return false;
+    if (target.mode === "all") return true;
+    if (target.mode === "role") return roomRoleMatches(membership, target.role);
+    if (target.mode === "session") return target.sessionIds.includes(membership.sessionId);
+    return false;
+  });
+  return [...new Map(selected.map((membership) => [membership.sessionId, membership])).values()];
+}
+
+function roomRoleMatches(membership, role) {
+  const expected = role.toLowerCase();
+  return [membership.role, membership.rolePresetName, membership.rolePresetLabel]
+    .filter(Boolean)
+    .some((value) => String(value).toLowerCase() === expected);
+}
+
+function formatRoomMessageForSession(message, room, targetSession, context = {}) {
+  const from = message.fromSessionName || message.fromSessionId || "user";
+  const to = targetSession.role || targetSession.rolePresetName || targetSession.sessionName;
+  return [
+    `[Room: ${room.name}]`,
+    `[From: ${from}]`,
+    `[To: ${to}]`,
+    "",
+    buildRoomCallbackInstructions(message, room, targetSession, context),
+    "",
+    message.text
+  ].join("\n");
+}
+
+function roomSubmitKeyDelayMs(text, config = {}) {
+  const base = Math.max(config.submitKeyDelayMs ?? 0, ROOM_SUBMIT_KEY_DELAY_MIN_MS);
+  const scaled = Math.ceil(String(text).length / 8);
+  return Math.min(ROOM_SUBMIT_KEY_DELAY_MAX_MS, Math.max(base, scaled));
+}
+
+function buildRoomCallbackInstructions(message, room, targetSession, { config } = {}) {
+  const callbackUrl = `${roomCallbackBaseUrl(config)}/api/rooms/${encodeURIComponent(room.id)}/messages`;
+  const resultPayload = {
+    fromSessionId: targetSession.sessionId,
+    text: `[DONE] ${message.metadata?.taskId ?? ""}\n- 完成内容：...\n- 产出物：...\n- 验证/证据：...\n- 阻塞项/后续建议：...`,
+    target: { mode: "room" },
+    metadata: { source: "agent-result", parentMessageId: message.id }
+  };
+  const curl = [
+    "curl -sS -X POST",
+    shellQuote(callbackUrl),
+    "-H",
+    shellQuote(`Authorization: Bearer ${config?.authToken ?? ""}`),
+    "-H",
+    shellQuote("Content-Type: application/json"),
+    "-d",
+    shellQuote(JSON.stringify(resultPayload))
+  ].join(" ");
+  return [
+    "System instruction: This is a room task delivered through Session Gateway.",
+    "When the task is done, failed, blocked, or you find a bug, you MUST send the final result back to the room by calling the callback API. Do not only reply inside this CLI session.",
+    "Result content must start with [DONE], [FAIL], [BLOCKED], or [BUG]. Send conclusions, artifacts, validation evidence, and blockers only; do not send raw terminal logs or full execution traces.",
+    `Callback API: POST ${callbackUrl}`,
+    "Use your current session id as fromSessionId so the room can attribute the result.",
+    `You can run this curl after replacing the content fields: ${curl}`
+  ].join("\n");
+}
+
+function roomCallbackBaseUrl(config = {}) {
+  if (typeof config.publicBaseUrl === "string" && config.publicBaseUrl.trim()) {
+    return config.publicBaseUrl.trim().replace(/\/+$/, "");
+  }
+  if (typeof process.env.SESSION_GATEWAY_PUBLIC_BASE_URL === "string" && process.env.SESSION_GATEWAY_PUBLIC_BASE_URL.trim()) {
+    return process.env.SESSION_GATEWAY_PUBLIC_BASE_URL.trim().replace(/\/+$/, "");
+  }
+  const host = config.host === "0.0.0.0" || config.host === "::" ? "127.0.0.1" : (config.host || "127.0.0.1");
+  return `http://${host}:${config.port || 8787}`;
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
 async function handleSessionAction(req, res, url, method, idOrName, action, context) {
@@ -285,6 +455,15 @@ async function handleSessionAction(req, res, url, method, idOrName, action, cont
     return;
   }
 
+  if (method === "POST" && action === "resize") {
+    const body = await readJsonBody(req);
+    const size = parseTmuxSize(body);
+    await tmux.resize(session, size.cols, size.rows);
+    store.touch(session.id);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
   if (method === "POST" && action === "restart") {
     await tmux.restart(session);
     store.markRunning(session.id);
@@ -319,6 +498,14 @@ function parseTmuxKeys(value) {
   });
 }
 
+function parseTmuxSize(value) {
+  const cols = Number(value?.cols);
+  const rows = Number(value?.rows);
+  if (!Number.isInteger(cols) || cols < 20 || cols > 500) throw new Error("cols must be an integer between 20 and 500");
+  if (!Number.isInteger(rows) || rows < 5 || rows > 200) throw new Error("rows must be an integer between 5 and 200");
+  return { cols, rows };
+}
+
 function isAllowedTmuxKey(key) {
   return (
     /^[A-Za-z0-9]$/.test(key) ||
@@ -331,7 +518,10 @@ async function handleNaturalLanguage(req, res, context) {
   const body = await readJsonBody(req);
   if (typeof body.text !== "string") throw new Error("text is required");
   if (context.sessionAgentManager?.run) {
-    const result = await context.sessionAgentManager.run(body.text, { currentSessionId: body.currentSessionId });
+    const result = await context.sessionAgentManager.run(body.text, {
+      currentSessionId: body.currentSessionId,
+      roomContext: body.roomContext
+    });
     sendJson(res, 200, result);
     return;
   }
@@ -509,6 +699,97 @@ function createSessionAgentOperations(context) {
         return acc;
       }, {});
       return JSON.stringify({ groups, sessions }, null, 2);
+    },
+    async list_rooms() {
+      const rooms = context.store.listRooms();
+      return { rooms };
+    },
+    async create_room(params = {}) {
+      if (typeof params.name !== "string" || !params.name.trim()) {
+        throw new Error("room name is required");
+      }
+      const room = context.store.createRoom({
+        name: params.name.trim(),
+        objective: typeof params.objective === "string" ? params.objective.trim() : undefined,
+        project: typeof params.project === "string" ? params.project.trim() : undefined
+      });
+      return { room };
+    },
+    async get_room(params = {}) {
+      const roomIdOrName = params.roomId ?? params.roomName ?? params.target;
+      if (typeof roomIdOrName !== "string" || !roomIdOrName.trim()) {
+        throw new Error("roomId or roomName is required");
+      }
+      const room = context.store.getRoom(roomIdOrName.trim());
+      if (!room) throw new Error(`Room not found: ${roomIdOrName}`);
+      return { room };
+    },
+    async assign_session_to_room(params = {}) {
+      const roomIdOrName = params.roomId ?? params.roomName;
+      if (typeof roomIdOrName !== "string" || !roomIdOrName.trim()) {
+        throw new Error("roomId is required");
+      }
+      const sessionIdOrName = params.sessionId ?? params.sessionName;
+      if (typeof sessionIdOrName !== "string" || !sessionIdOrName.trim()) {
+        throw new Error("sessionId is required");
+      }
+      const room = context.store.getRoom(roomIdOrName.trim());
+      if (!room) throw new Error(`Room not found: ${roomIdOrName}`);
+      const session = context.store.findByIdOrName(sessionIdOrName.trim());
+      if (!session) throw new Error(`Session not found: ${sessionIdOrName}`);
+
+      const options = {
+        rolePresetId: typeof params.rolePresetId === "string" && params.rolePresetId.trim() ? params.rolePresetId.trim() : null,
+        rolePrompt: typeof params.rolePrompt === "string" ? params.rolePrompt : undefined
+      };
+      const membership = context.store.assignSessionToRoom(room.id, session.id, params.role ?? null, options);
+
+      if (params.injectRolePrompt && membership?.rolePrompt) {
+        if (session.kind !== "runtime") {
+          await new Promise((resolve) => setTimeout(resolve, context.config.cliStartupDelayMs));
+        }
+        const text = rolePromptMessage(membership);
+        await context.tmux.send(session, text);
+        saveInputIfSupported(context.store, session.id, text);
+        context.store.touch(session.id);
+      }
+
+      return { room: context.store.getRoom(room.id), membership, session: context.store.findByIdOrName(session.id) };
+    },
+    async send_room_message(params = {}) {
+      const roomIdOrName = params.roomId ?? params.roomName;
+      if (typeof roomIdOrName !== "string" || !roomIdOrName.trim()) {
+        throw new Error("roomId is required");
+      }
+      if (typeof params.text !== "string" || !params.text.trim()) {
+        throw new Error("text is required");
+      }
+      const room = context.store.getRoom(roomIdOrName.trim());
+      if (!room) throw new Error(`Room not found: ${roomIdOrName}`);
+
+      const result = await dispatchRoomMessage(room.id, {
+        text: params.text,
+        fromSessionId: params.fromSessionId ?? null,
+        target: {
+          mode: params.targetMode ?? "all",
+          role: params.targetRole ?? null,
+          sessionIds: params.targetSessionIds ?? []
+        },
+        metadata: params.metadata ?? { source: "web-pi" }
+      }, context);
+
+      return result;
+    },
+    async list_room_messages(params = {}) {
+      const roomIdOrName = params.roomId ?? params.roomName;
+      if (typeof roomIdOrName !== "string" || !roomIdOrName.trim()) {
+        throw new Error("roomId is required");
+      }
+      const room = context.store.getRoom(roomIdOrName.trim());
+      if (!room) throw new Error(`Room not found: ${roomIdOrName}`);
+      const limit = typeof params.limit === "number" ? Math.min(500, Math.max(1, params.limit)) : 100;
+      const messages = context.store.listRoomMessages(room.id, limit);
+      return { room, messages };
     }
   };
 }
@@ -913,6 +1194,9 @@ async function assignCreatedSessionToRoom(session, body, { store }) {
 async function injectRolePromptIfRequested(session, membership, body, context, { defaultEnabled }) {
   const shouldInject = body.injectRolePrompt === undefined ? defaultEnabled : Boolean(body.injectRolePrompt);
   if (!shouldInject || !membership?.rolePrompt) return;
+  if (session.kind !== "runtime") {
+    await new Promise((resolve) => setTimeout(resolve, context.config.cliStartupDelayMs));
+  }
   const text = rolePromptMessage(membership);
   await context.tmux.send(session, text);
   saveInputIfSupported(context.store, session.id, text);

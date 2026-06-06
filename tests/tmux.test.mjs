@@ -231,3 +231,72 @@ test("TmuxBackend send submits text with the configured submit key", async () =>
     }
   ]);
 });
+
+test("TmuxBackend send can override the submit key delay per call", async () => {
+  const sleeps = [];
+  const tmux = new TmuxBackend(
+    {
+      defaultRuntimeCommand: "/bin/bash",
+      submitKeyDelayMs: 80,
+      submitKeys: { codex: "Enter" },
+      cliCommands: {}
+    },
+    {
+      run: async () => ({ stdout: "" }),
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      }
+    }
+  );
+
+  await tmux.send(
+    {
+      id: "session-1",
+      kind: "codex",
+      tmuxSessionName: "glass-to-ai"
+    },
+    "long room prompt",
+    { submitKeyDelayMs: 700 }
+  );
+
+  assert.deepEqual(sleeps, [700]);
+});
+
+test("TmuxBackend resize updates the tmux window size", async () => {
+  const calls = [];
+  const tmux = new TmuxBackend(
+    {
+      defaultRuntimeCommand: "/bin/bash",
+      cliCommands: {}
+    },
+    {
+      run: async (command, args, timeoutMs) => {
+        calls.push({ command, args, timeoutMs });
+        return { stdout: "" };
+      }
+    }
+  );
+
+  await tmux.resize(
+    {
+      id: "session-1",
+      kind: "opencode",
+      tmuxSessionName: "opencode-work"
+    },
+    132,
+    40
+  );
+
+  assert.deepEqual(calls, [
+    {
+      command: "tmux",
+      args: ["has-session", "-t", "=opencode-work"],
+      timeoutMs: 3000
+    },
+    {
+      command: "tmux",
+      args: ["resize-window", "-t", "=opencode-work", "-x", "132", "-y", "40"],
+      timeoutMs: undefined
+    }
+  ]);
+});

@@ -181,6 +181,24 @@ test("SessionStore creates rooms and assigns sessions with roles", () => {
   store.close();
 });
 
+test("SessionStore moves a session between rooms instead of keeping duplicate room memberships", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-"));
+  const store = new SessionStore(path.join(dir, "test.sqlite"));
+
+  const session = store.create({ kind: "runtime", cwd: dir, name: "worker" }, "/bin/bash", []);
+  const first = store.createRoom({ name: "first-room" });
+  const second = store.createRoom({ name: "second-room" });
+
+  store.assignSessionToRoom(first.id, session.id, "planner");
+  store.assignSessionToRoom(second.id, session.id, "reviewer");
+
+  assert.equal(store.getRoom(first.id).sessions.length, 0);
+  assert.equal(store.getRoom(second.id).sessions.length, 1);
+  assert.equal(store.getRoom(second.id).sessions[0].role, "reviewer");
+  assert.deepEqual(store.findByIdOrName(session.id).rooms.map((room) => room.roomName), ["second-room"]);
+  store.close();
+});
+
 test("SessionStore seeds ECC role presets and stores preset prompts on room sessions", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-"));
   const store = new SessionStore(path.join(dir, "test.sqlite"));
@@ -200,5 +218,36 @@ test("SessionStore seeds ECC role presets and stores preset prompts on room sess
   assert.equal(membership.rolePresetName, "code-reviewer");
   assert.equal(membership.rolePresetLabel, "代码审查员");
   assert.match(membership.rolePrompt, /senior code reviewer/i);
+  store.close();
+});
+
+test("SessionStore stores room messages with per-session delivery state", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-"));
+  const store = new SessionStore(path.join(dir, "test.sqlite"));
+
+  const planner = store.create({ kind: "runtime", cwd: dir, name: "planner" }, "/bin/bash", []);
+  const reviewer = store.create({ kind: "runtime", cwd: dir, name: "reviewer" }, "/bin/bash", []);
+  const room = store.createRoom({ name: "review-room" });
+  store.assignSessionToRoom(room.id, planner.id, "planner");
+  store.assignSessionToRoom(room.id, reviewer.id, "reviewer");
+
+  const message = store.createRoomMessage({
+    roomId: room.id,
+    fromSessionId: planner.id,
+    targetMode: "role",
+    targetRole: "reviewer",
+    text: "Please review the plan",
+    metadata: { source: "test" }
+  });
+  const delivery = store.addRoomMessageDelivery(message.id, reviewer.id);
+  store.updateRoomMessageDelivery(delivery.id, "sent");
+
+  const messages = store.listRoomMessages(room.id);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].fromSessionName, "planner");
+  assert.equal(messages[0].targetRole, "reviewer");
+  assert.equal(messages[0].metadata.source, "test");
+  assert.equal(messages[0].deliveries[0].sessionName, "reviewer");
+  assert.equal(messages[0].deliveries[0].status, "sent");
   store.close();
 });

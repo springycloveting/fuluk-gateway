@@ -83,10 +83,10 @@ export class TmuxBackend {
     }
   }
 
-  async send(record, text) {
+  async send(record, text, options = {}) {
     await this.ensureSessionExists(record);
     await this.run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), "-l", "--", text]);
-    await this.sleep(this.config.submitKeyDelayMs);
+    await this.sleep(options.submitKeyDelayMs ?? this.config.submitKeyDelayMs);
     await this.run("tmux", [
       "send-keys",
       "-t",
@@ -98,6 +98,19 @@ export class TmuxBackend {
   async sendKeys(record, keys) {
     await this.ensureSessionExists(record);
     await this.run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), ...keys]);
+  }
+
+  async resize(record, cols, rows) {
+    await this.ensureSessionExists(record);
+    await this.run("tmux", [
+      "resize-window",
+      "-t",
+      exactTmuxSessionTarget(record.tmuxSessionName),
+      "-x",
+      String(cols),
+      "-y",
+      String(rows)
+    ]);
   }
 
   async capture(record, lines) {

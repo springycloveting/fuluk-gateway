@@ -150,6 +150,71 @@ input::placeholder {
   white-space: nowrap;
 }
 
+.all-yes-btn {
+  align-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text);
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 12px;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 10px;
+  white-space: nowrap;
+  cursor: pointer;
+  background: var(--panel-2);
+  transition: all 0.2s;
+}
+
+.all-yes-btn:hover {
+  background: var(--panel);
+  border-color: var(--border);
+}
+
+.all-yes-btn[data-state="session"] {
+  background: color-mix(in srgb, var(--primary) 18%, var(--panel-2));
+  border-color: var(--primary);
+  color: var(--text-strong);
+}
+
+.all-yes-btn[data-state="global"] {
+  background: color-mix(in srgb, var(--success) 18%, var(--panel-2));
+  border-color: var(--success);
+  color: var(--text-strong);
+}
+
+.all-yes-btn::after {
+  content: attr(data-label);
+  font-size: 10px;
+  opacity: 0.8;
+}
+
+.all-yes-btn[data-state="off"]::after {
+  content: "off";
+}
+
+.all-yes-btn[data-state="session"]::after {
+  content: "当前会话";
+}
+
+.all-yes-btn[data-state="global"]::after {
+  content: "全局";
+}
+
+.confirm-alert {
+  background: color-mix(in srgb, var(--warning) 18%, var(--panel-2));
+  border-color: var(--warning);
+  color: var(--text-strong);
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 700;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 h1,
 h2 {
   margin: 0;
@@ -195,7 +260,7 @@ h2 {
   border-top: 1px solid var(--border);
   display: grid;
   gap: 8px;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   min-height: 42px;
   padding: 6px 8px;
 }
@@ -229,6 +294,26 @@ h2 {
   padding: 0;
 }
 
+.room-actions {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.room-actions[hidden] {
+  display: none;
+}
+
+.room-actions select {
+  max-width: 150px;
+  min-height: 30px;
+}
+
+.room-actions button {
+  min-height: 30px;
+}
+
 .input-row {
   background: var(--page);
   border-top: 1px solid var(--border);
@@ -240,6 +325,79 @@ h2 {
 .input-row input {
   flex: 1;
   min-width: 0;
+}
+
+.room-panel {
+  background: var(--terminal);
+  border-top: 1px solid var(--border);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+}
+
+.room-panel[hidden] {
+  display: none;
+}
+
+.room-panel-head {
+  align-items: center;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  min-height: 44px;
+  padding: 8px 10px;
+}
+
+.room-panel-head h2 {
+  font-size: 15px;
+  margin: 0;
+}
+
+.room-panel-head p {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 2px 0 0;
+}
+
+.room-messages {
+  align-content: start;
+  display: grid;
+  gap: 8px;
+  overflow: auto;
+  padding: 12px;
+}
+
+.room-empty {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 8px 2px;
+}
+
+.room-message {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 5px;
+  padding: 8px 10px;
+}
+
+.room-message-meta,
+.room-message-delivery {
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 11px;
+  gap: 8px;
+}
+
+.room-message-text {
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .sessions-panel {
@@ -656,4 +814,106 @@ button.danger {
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--text);
+}
+
+.review-buttons {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.review-btn {
+  padding: 6px 12px;
+  font-size: 13px;
+  background: var(--warning);
+  color: var(--text-strong);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.review-btn:hover {
+  background: #e6a123;
+}
+
+.review-session-info {
+  padding: 12px;
+  background: var(--panel-2);
+  border-radius: 4px;
+  margin-bottom: 16px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.review-session-info .session-name {
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.review-session-info .session-status {
+  color: var(--warning);
+  margin-top: 4px;
+}
+
+.review-session-info .session-output-label {
+  margin-top: 12px;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.review-session-info .session-output-loading,
+.review-session-info .session-output-content,
+.review-session-info .session-output-error {
+  margin-top: 8px;
+  padding: 8px;
+  background: var(--terminal);
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.review-session-info .session-output-loading {
+  color: var(--muted);
+}
+
+.review-session-info .session-output-content {
+  color: var(--text);
+}
+
+.review-session-info .session-output-error {
+  color: var(--danger);
+}
+
+.review-quick-buttons {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+.review-quick-btn {
+  width: 48px;
+  height: 48px;
+  font-size: 18px;
+  font-weight: 600;
+  background: var(--primary);
+  color: var(--text-strong);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.review-quick-btn:hover {
+  background: #4f91f9;
+  transform: translateY(-2px);
+}
+
+.review-quick-btn:active {
+  transform: translateY(0);
 }

@@ -1,8 +1,15 @@
 const state = {
   sessions: [],
   rooms: [],
+  roomMessages: [],
   rolePresets: [],
   selectedRoomId: localStorage.getItem("sessionGatewaySelectedRoomId") || "",
+  selectedRoomChatId: "",
+  selectedRoomTargetMode: "all",
+  selectedRoomTargetRole: "",
+  selectedRoomTargetSessionId: "",
+  selectedSessionId: "",
+  selectionVersion: 0,
   selected: null,
   outputLoading: false,
   outputLoadingSessionId: null,
@@ -12,15 +19,19 @@ const state = {
   sessionLoading: false,
   outputPollDelayMs: 1000,
   outputWheelLastSentAt: 0,
-  allYesEnabled: localStorage.getItem("sessionGatewayAllYes") === "1",
+  terminalResizeBySession: new Map(),
+  allYesMode: localStorage.getItem("sessionGatewayAllYesMode") || "off",
   autoYesSignatures: new Map(),
   cliDeploymentDefaults: {},
   notifications: {},
   pendingDeleteSession: null,
   assistantMessages: [],
+  assistantRoomContext: null,
+  pendingDeleteRoom: null,
   customQuickKeys: loadCustomQuickKeys(),
   language: localStorage.getItem("sessionGatewayLanguage") || "zh",
-  theme: localStorage.getItem("sessionGatewayTheme") || "dark"
+  theme: localStorage.getItem("sessionGatewayTheme") || "dark",
+  reviewingSessionId: null
 };
 
 const OUTPUT_POLL_DELAYS_MS = [1000, 2000, 5000, 10000];
@@ -65,6 +76,15 @@ const translations = {
     joinRoom: "房间",
     rolePrompt: "输入该会话在房间里的角色",
     injectRolePrompt: "发送角色说明到会话",
+    roomConversation: "房间对话",
+    projectGroupChat: "项目群聊",
+    roomEmpty: "这个房间还没有消息。",
+    roomAll: "房间全员",
+    roomRole: "按角色",
+    roomSession: "房间会话",
+    currentSession: "当前会话",
+    noRoleTarget: "没有可用角色",
+    noSessionTarget: "没有可用会话",
     commandTitle: "助手",
     deleteTitle: "删除会话",
     historyTitle: "输入历史",
@@ -95,7 +115,13 @@ const translations = {
     rolePlaceholder: "角色，例如 reviewer",
     roomNamePlaceholder: "房间名，例如 frontend-redesign",
     roomObjectivePlaceholder: "目标",
-    nlPlaceholder: "问 web-pi，例如：查看并总结当前会话。"
+    nlPlaceholder: "问 web-pi，例如：查看并总结当前会话。",
+    roomAssistantTitle: "群聊助手",
+    roomAssistantSubtitle: "房间协调",
+    roomAssistantEmpty: "群聊助手帮助协调房间内各会话的协作。可以发送任务、查看状态、分配角色。",
+    deleteRoomTitle: "删除房间",
+    deleteRoom: "删除房间",
+    deleteRoomConfirm: "确认删除房间「{name}」？房间内的会话将变为独立会话。",
   },
   en: {
     sessions: "Sessions",
@@ -135,6 +161,15 @@ const translations = {
     joinRoom: "Room",
     rolePrompt: "Role for this session in the room",
     injectRolePrompt: "Send role prompt to session",
+    roomConversation: "Room conversation",
+    projectGroupChat: "Project chat",
+    roomEmpty: "No room messages yet.",
+    roomAll: "All room sessions",
+    roomRole: "By role",
+    roomSession: "Room session",
+    currentSession: "Current session",
+    noRoleTarget: "No roles available",
+    noSessionTarget: "No sessions available",
     commandTitle: "Assistant",
     deleteTitle: "Delete Session",
     historyTitle: "Input History",
@@ -165,7 +200,13 @@ const translations = {
     rolePlaceholder: "Role, e.g. reviewer",
     roomNamePlaceholder: "Room name, e.g. frontend-redesign",
     roomObjectivePlaceholder: "Objective",
-    nlPlaceholder: "Ask web-pi, e.g. summarize the current session."
+    nlPlaceholder: "Ask web-pi, e.g. summarize the current session.",
+    roomAssistantTitle: "Room Assistant",
+    roomAssistantSubtitle: "Room coordination",
+    roomAssistantEmpty: "Room assistant helps coordinate sessions in the room. Send tasks, check status, assign roles.",
+    deleteRoomTitle: "Delete Room",
+    deleteRoom: "Delete Room",
+    deleteRoomConfirm: "Delete room \"{name}\"? Sessions in this room will become standalone.",
   }
 };
 
@@ -229,6 +270,19 @@ const els = {
   assignRolePreset: document.querySelector("#assign-role-preset"),
   assignRole: document.querySelector("#assign-role"),
   assignInjectPrompt: document.querySelector("#assign-inject-prompt"),
+  roomPanel: document.querySelector("#room-panel"),
+  roomTitle: document.querySelector("#room-title"),
+  roomSubtitle: document.querySelector("#room-subtitle"),
+  roomMessages: document.querySelector("#room-messages"),
+  roomActions: document.querySelector("#room-actions"),
+  openRoomAssistant: document.querySelector("#open-room-assistant"),
+  refreshRoomMessages: document.querySelector("#refresh-room-messages"),
+  deleteRoomDialog: document.querySelector("#delete-room-dialog"),
+  deleteRoomForm: document.querySelector("#delete-room-form"),
+  deleteRoomMessage: document.querySelector("#delete-room-message"),
+  reviewButtons: document.querySelector("#review-buttons"),
+  reviewDialog: document.querySelector("#review-dialog"),
+  reviewSessionInfo: document.querySelector("#review-session-info"),
   create: document.querySelector("#create"),
   nl: document.querySelector("#nl"),
   runNl: document.querySelector("#run-nl"),
@@ -238,6 +292,9 @@ const els = {
   list: document.querySelector("#session-list"),
   title: document.querySelector("#selected-title"),
   output: document.querySelector("#output"),
+  sendTargetMode: document.querySelector("#send-target-mode"),
+  sendTargetRole: document.querySelector("#send-target-role"),
+  sendTargetSession: document.querySelector("#send-target-session"),
   input: document.querySelector("#input"),
   send: document.querySelector("#send"),
   restart: document.querySelector("#restart"),
@@ -247,19 +304,28 @@ const els = {
 els.token.value = localStorage.getItem("sessionGatewayToken") || "";
 els.language.value = state.language;
 els.theme.value = state.theme;
-els.allYes.checked = state.allYesEnabled;
+updateAllYesButton();
 els.token.addEventListener("input", () => {
   localStorage.setItem("sessionGatewayToken", els.token.value);
 });
-els.allYes.addEventListener("change", async () => {
-  state.allYesEnabled = els.allYes.checked;
-  localStorage.setItem("sessionGatewayAllYes", state.allYesEnabled ? "1" : "0");
-  if (state.allYesEnabled) {
+els.allYes.addEventListener("click", async () => {
+  const modes = ["off", "session", "global"];
+  const currentIndex = modes.indexOf(state.allYesMode);
+  const nextIndex = (currentIndex + 1) % modes.length;
+  state.allYesMode = modes[nextIndex];
+  localStorage.setItem("sessionGatewayAllYesMode", state.allYesMode);
+  updateAllYesButton();
+  
+  if (state.allYesMode !== "off") {
     if (state.selected?.status === "running") {
       clearOutputEtag(state.selected.id);
       await loadOutput({ force: true });
     }
-    maybeAutoYes(els.output.textContent, { force: true });
+    if (state.allYesMode === "session") {
+      maybeAutoYes(els.output.textContent, { force: true });
+    } else if (state.allYesMode === "global") {
+      await autoYesAllSessions();
+    }
   }
 });
 els.language.addEventListener("change", () => {
@@ -292,6 +358,8 @@ els.openHistory.addEventListener("click", async () => {
   els.historyDialog.showModal();
 });
 els.openCreate.addEventListener("click", () => {
+  delete els.kind.dataset.touched;
+  delete els.createDeploymentMode.dataset.touched;
   updateCreateDeploymentControls();
   els.createDialog.showModal();
   els.cwd.focus();
@@ -310,7 +378,32 @@ els.refresh.addEventListener("click", refreshSessions);
 els.roomFilter.addEventListener("change", () => {
   state.selectedRoomId = els.roomFilter.value;
   localStorage.setItem("sessionGatewaySelectedRoomId", state.selectedRoomId);
+  if (state.selectedRoomChatId && state.selectedRoomChatId !== selectedRealRoomId()) {
+    state.selectedRoomChatId = "";
+    showTerminalView();
+  }
   renderSessions();
+  renderRoomPanel();
+  renderQuickKeys();
+});
+els.refreshRoomMessages.addEventListener("click", loadRoomMessages);
+els.openRoomAssistant.addEventListener("click", () => {
+  openRoomAssistantDialog();
+  els.nl.focus();
+});
+els.deleteRoomForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  deletePendingRoom();
+});
+els.sendTargetMode.addEventListener("change", () => {
+  state.selectedRoomTargetMode = els.sendTargetMode.value;
+  renderSendTargetControls();
+});
+els.sendTargetRole.addEventListener("change", () => {
+  state.selectedRoomTargetRole = els.sendTargetRole.value;
+});
+els.sendTargetSession.addEventListener("change", () => {
+  state.selectedRoomTargetSessionId = els.sendTargetSession.value;
 });
 els.openRoomCreate.addEventListener("click", () => {
   els.roomName.value = "";
@@ -345,6 +438,7 @@ els.assignRoleForm.addEventListener("submit", (event) => {
   assignRoleFromDialog();
 });
 els.kind.addEventListener("change", () => {
+  els.kind.dataset.touched = "1";
   delete els.createDeploymentMode.dataset.touched;
   updateCreateDeploymentControls();
 });
@@ -368,9 +462,15 @@ els.quickKeyForm.addEventListener("submit", (event) => {
   event.preventDefault();
   saveQuickKey();
 });
+document.querySelectorAll(".review-quick-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const value = btn.dataset.value;
+    sendQuickReview(value);
+  });
+});
 els.input.addEventListener("keydown", (event) => {
   if (event.key === "Enter") sendInput();
-  if (event.key === "PageUp" || event.key === "PageDown") {
+  if (!selectedRoomForChat() && (event.key === "PageUp" || event.key === "PageDown")) {
     event.preventDefault();
     sendQuickKeys([event.key]);
   }
@@ -515,6 +615,24 @@ async function loadRooms() {
       localStorage.setItem("sessionGatewaySelectedRoomId", "");
     }
     renderRoomControls();
+    renderRoomPanel();
+    renderSendTargetControls();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function loadRoomMessages() {
+  const roomId = state.selectedRoomChatId;
+  if (!roomId) {
+    state.roomMessages = [];
+    renderRoomPanel();
+    return;
+  }
+  try {
+    const data = await api(`/api/rooms/${encodeURIComponent(roomId)}/messages`);
+    state.roomMessages = data.messages ?? [];
+    renderRoomPanel();
   } catch (error) {
     showError(error);
   }
@@ -535,8 +653,10 @@ async function createRoom() {
     state.selectedRoomId = data.room.id;
     localStorage.setItem("sessionGatewaySelectedRoomId", state.selectedRoomId);
     els.roomCreateDialog.close();
+    state.roomMessages = [];
     renderRoomControls();
     renderSessions();
+    await selectRoomChat(data.room);
   } catch (error) {
     showError(error);
   }
@@ -560,6 +680,107 @@ function renderRoomControls() {
   els.assignRoom.innerHTML = state.rooms
     .map((room) => `<option value="${escapeHtml(room.id)}">${escapeHtml(room.name)}</option>`)
     .join("");
+  renderSendTargetControls();
+}
+
+function renderSendTargetControls() {
+  const room = selectedRoomForChat() ?? selectedRoom();
+  const roomSessions = room?.sessions ?? [];
+  const roles = [...new Set(roomSessions.map(roomSessionRole).filter(Boolean))];
+  const runningSessions = roomSessions.filter((session) => session.sessionStatus === "running");
+  const hasRoom = Boolean(room);
+  const validModes = new Set(["all", "role", "session-in-room"]);
+  if (!validModes.has(state.selectedRoomTargetMode)) state.selectedRoomTargetMode = "all";
+  els.sendTargetMode.value = state.selectedRoomTargetMode;
+
+  [...els.sendTargetMode.options].forEach((option) => {
+    option.disabled = !hasRoom;
+    if (option.value === "role") option.disabled = !hasRoom || !roles.length;
+    if (option.value === "session-in-room") option.disabled = !hasRoom || !runningSessions.length;
+  });
+  if (els.sendTargetMode.selectedOptions[0]?.disabled) {
+    state.selectedRoomTargetMode = "all";
+    els.sendTargetMode.value = "all";
+  }
+
+  els.sendTargetRole.innerHTML = roles.length
+    ? roles.map((role) => `<option value="${escapeHtml(role)}">${escapeHtml(role)}</option>`).join("")
+    : `<option value="">${escapeHtml(t("noRoleTarget"))}</option>`;
+  if (roles.includes(state.selectedRoomTargetRole)) {
+    els.sendTargetRole.value = state.selectedRoomTargetRole;
+  } else {
+    state.selectedRoomTargetRole = roles[0] || "";
+    els.sendTargetRole.value = state.selectedRoomTargetRole;
+  }
+  els.sendTargetSession.innerHTML = runningSessions.length
+    ? runningSessions
+        .map((session) => `<option value="${escapeHtml(session.sessionId)}">${escapeHtml(session.sessionName)}</option>`)
+        .join("")
+    : `<option value="">${escapeHtml(t("noSessionTarget"))}</option>`;
+  if (runningSessions.some((session) => session.sessionId === state.selectedRoomTargetSessionId)) {
+    els.sendTargetSession.value = state.selectedRoomTargetSessionId;
+  } else {
+    state.selectedRoomTargetSessionId = runningSessions[0]?.sessionId || "";
+    els.sendTargetSession.value = state.selectedRoomTargetSessionId;
+  }
+
+  els.sendTargetRole.hidden = els.sendTargetMode.value !== "role";
+  els.sendTargetSession.hidden = els.sendTargetMode.value !== "session-in-room";
+  els.input.placeholder = sendInputPlaceholder();
+}
+
+function roomSessionRole(session) {
+  return session.role || session.rolePresetLabel || session.rolePresetName || "";
+}
+
+function renderRoomPanel() {
+  const room = selectedRoomForChat();
+  const active = Boolean(room);
+  els.roomPanel.hidden = !active;
+  els.output.hidden = active;
+  els.roomActions.hidden = !active;
+  els.addQuickKey.hidden = active;
+  renderReviewButtons();
+  if (!room) return;
+  els.roomTitle.textContent = room.name;
+  els.roomSubtitle.textContent = [room.objective, room.project].filter(Boolean).join(" · ");
+  if (!state.roomMessages.length) {
+    els.roomMessages.innerHTML = `<div class="room-empty">${escapeHtml(t("roomEmpty"))}</div>`;
+    return;
+  }
+  els.roomMessages.innerHTML = state.roomMessages.map(renderRoomMessage).join("");
+  els.roomMessages.scrollTop = els.roomMessages.scrollHeight;
+}
+
+function renderRoomMessage(message) {
+  const deliveryText = (message.deliveries ?? [])
+    .map((delivery) => `${delivery.sessionName}: ${delivery.status}${delivery.error ? ` (${delivery.error})` : ""}`)
+    .join(" · ");
+  const target = roomMessageTargetLabel(message);
+  return `
+    <article class="room-message">
+      <div class="room-message-meta">
+        <span>${escapeHtml(message.fromSessionName || t("assistantUser"))}</span>
+        <span>${escapeHtml(target)}</span>
+        <span>${escapeHtml(formatRoomTime(message.createdAt))}</span>
+      </div>
+      <div class="room-message-text">${escapeHtml(message.text)}</div>
+      <div class="room-message-delivery">${escapeHtml(deliveryText)}</div>
+    </article>
+  `;
+}
+
+function roomMessageTargetLabel(message) {
+  if (message.targetMode === "all") return t("roomAll");
+  if (message.targetMode === "role") return `${t("roomRole")}: ${message.targetRole}`;
+  if (message.targetMode === "session") return t("roomSession");
+  return message.targetMode;
+}
+
+function formatRoomTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 async function loadRolePresets() {
@@ -587,7 +808,7 @@ function applySelectedPresetToRole(select, input) {
   const preset = state.rolePresets.find((item) => item.id === select.value);
   if (!preset) return;
   input.value = preset.label || preset.name;
-  if (select === els.createRolePreset && preset.defaultKind) {
+  if (select === els.createRolePreset && preset.defaultKind && !els.kind.dataset.touched) {
     els.kind.value = preset.defaultKind;
     updateCreateDeploymentControls();
   }
@@ -596,13 +817,27 @@ function applySelectedPresetToRole(select, input) {
 async function refreshSessions() {
   if (state.sessionLoading) return;
   state.sessionLoading = true;
+  const selectionVersion = state.selectionVersion;
   try {
     const data = await api("/api/sessions");
     state.sessions = data.sessions;
     await loadRooms();
-    if (state.selected) {
-      const current = state.sessions.find((session) => session.id === state.selected.id);
+    if (selectionVersion !== state.selectionVersion) return;
+    if (state.selectedRoomChatId) {
+      state.selected = null;
+      state.selectedSessionId = "";
+      renderSessions();
+      renderTaskAlert();
+      renderQuickKeys();
+      clearOutputPoll();
+      await loadRoomMessages();
+      return;
+    }
+    if (state.selectedSessionId || state.selected) {
+      const selectedId = state.selectedSessionId || state.selected?.id;
+      const current = state.sessions.find((session) => session.id === selectedId);
       state.selected = current || null;
+      state.selectedSessionId = state.selected?.id || "";
       renderSessions();
       renderTaskAlert();
       renderQuickKeys();
@@ -619,6 +854,7 @@ async function refreshSessions() {
       return;
     }
     state.selected = state.sessions.find((session) => session.status === "running") ?? state.sessions[0] ?? null;
+    state.selectedSessionId = state.selected?.id || "";
     renderSessions();
     renderTaskAlert();
     renderQuickKeys();
@@ -633,6 +869,9 @@ async function refreshSessions() {
   } finally {
     state.sessionLoading = false;
     scheduleSessionPoll();
+    if (state.allYesMode === "global") {
+      autoYesAllSessions();
+    }
   }
 }
 
@@ -657,6 +896,8 @@ async function createSession() {
       body: JSON.stringify(body)
     });
     state.selected = data.session;
+    state.selectedSessionId = data.session.id;
+    state.selectionVersion += 1;
     clearOutputEtag(state.selected.id);
     els.createDialog.close();
     els.createRolePreset.value = "";
@@ -674,15 +915,21 @@ async function runNaturalCommand() {
   els.nl.value = "";
   els.runNl.disabled = true;
   try {
+    const body = { text, currentSessionId: state.selected?.id };
+    if (state.assistantRoomContext) {
+      body.roomContext = state.assistantRoomContext;
+    }
     const result = await api("/api/nl", {
       method: "POST",
-      body: JSON.stringify({ text, currentSessionId: state.selected?.id })
+      body: JSON.stringify(body)
     });
     if (typeof result === "string") {
       appendAssistantMessage("assistant", result);
     } else {
       if (result.session) {
         state.selected = result.session;
+        state.selectedSessionId = result.session.id;
+        state.selectionVersion += 1;
       }
       appendAssistantMessage("assistant", formatCommandResult(result));
       const updateTerminal = result.presentation?.updateTerminal !== false;
@@ -702,12 +949,13 @@ async function runNaturalCommand() {
 }
 
 async function loadOutput(options = {}) {
-  if (!state.selected) return null;
-  if (state.selected.status !== "running") {
-    showSessionSummary(state.selected);
+  const selected = currentSelectedSession();
+  if (!selected) return null;
+  if (selected.status !== "running") {
+    showSessionSummary(selected);
     return null;
   }
-  const sessionId = state.selected.id;
+  const sessionId = selected.id;
   if (state.outputLoading && state.outputLoadingSessionId === sessionId) return null;
   state.outputLoading = true;
   state.outputLoadingSessionId = sessionId;
@@ -716,7 +964,7 @@ async function loadOutput(options = {}) {
     const etag = state.outputEtags.get(sessionId);
     if (etag && !options.force) params.set("etag", etag);
     const data = await api(`/api/sessions/${encodeURIComponent(sessionId)}/output?${params}`);
-    if (state.selected?.id !== sessionId) return null;
+    if (state.selectedSessionId !== sessionId) return null;
     if (typeof data === "string") {
       updateOutputText(data);
       clearOutputEtag(sessionId);
@@ -735,6 +983,49 @@ async function loadOutput(options = {}) {
       state.outputLoadingSessionId = null;
     }
   }
+}
+
+async function resizeTerminalForSession(session) {
+  const size = measureTerminalSize();
+  if (!size) return false;
+  const signature = `${size.cols}x${size.rows}`;
+  if (state.terminalResizeBySession.get(session.id) === signature) return false;
+  await api(`/api/sessions/${encodeURIComponent(session.id)}/resize`, {
+    method: "POST",
+    body: JSON.stringify(size)
+  });
+  state.terminalResizeBySession.set(session.id, signature);
+  clearOutputEtag(session.id);
+  return true;
+}
+
+function measureTerminalSize() {
+  if (!els.output || els.output.hidden) return null;
+  const style = getComputedStyle(els.output);
+  const width =
+    els.output.clientWidth - parseFloat(style.paddingLeft || "0") - parseFloat(style.paddingRight || "0");
+  const height =
+    els.output.clientHeight - parseFloat(style.paddingTop || "0") - parseFloat(style.paddingBottom || "0");
+  if (width <= 0 || height <= 0) return null;
+
+  const probe = document.createElement("span");
+  probe.textContent = "MMMMMMMMMM";
+  probe.style.cssText =
+    "position:absolute;visibility:hidden;white-space:pre;left:-9999px;top:-9999px;font:inherit;";
+  els.output.appendChild(probe);
+  const charWidth = probe.getBoundingClientRect().width / 10;
+  probe.remove();
+
+  const lineHeight = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.2;
+  if (!charWidth || !lineHeight) return null;
+  return {
+    cols: clampInteger(Math.floor(width / charWidth), 20, 500),
+    rows: clampInteger(Math.floor(height / lineHeight), 5, 200)
+  };
+}
+
+function clampInteger(value, min, max) {
+  return Math.min(max, Math.max(min, value));
 }
 
 function updateOutputText(text) {
@@ -759,22 +1050,53 @@ function handleOutputWheel(event) {
 }
 
 function shouldForwardOutputWheel(event) {
-  if (!state.selected || state.selected.status !== "running" || state.selected.kind === "runtime") return false;
+  const selected = currentSelectedSession();
+  if (!selected || selected.status !== "running" || selected.kind === "runtime") return false;
   if (!event.deltaY) return false;
   const canScrollUp = els.output.scrollTop > 0;
   const canScrollDown = els.output.scrollTop + els.output.clientHeight < els.output.scrollHeight - 1;
   return event.deltaY < 0 ? !canScrollUp : !canScrollDown;
 }
 
+function updateAllYesButton() {
+  els.allYes.dataset.state = state.allYesMode;
+}
+
 function maybeAutoYes(text, options = {}) {
-  if (!state.allYesEnabled || !state.selected || state.selected.status !== "running") return;
-  if (state.selected.kind === "runtime") return;
-  const match = findYesOption(text);
-  if (!match) return;
-  const sessionId = state.selected.id;
-  const signature = match.signature;
-  if (!options.force && state.autoYesSignatures.get(sessionId) === signature) return;
-  sendAutoYes(sessionId, signature, match.key, match.type);
+  if (state.allYesMode === "off") return;
+  
+  const selected = currentSelectedSession();
+  if (state.allYesMode === "session") {
+    if (!selected || selected.status !== "running") return;
+    if (selected.kind === "runtime") return;
+    const match = findYesOption(text);
+    if (!match) return;
+    const sessionId = selected.id;
+    const signature = match.signature;
+    if (!options.force && state.autoYesSignatures.get(sessionId) === signature) return;
+    sendAutoYes(sessionId, signature, match.key, match.type);
+  }
+}
+
+async function autoYesAllSessions() {
+  const sessionsNeedingConfirmation = state.sessions.filter(
+    (session) => session.taskState === "needs_confirmation" && session.status === "running"
+  );
+  
+  for (const session of sessionsNeedingConfirmation) {
+    try {
+      const output = await api(`/api/sessions/${encodeURIComponent(session.id)}/output?lines=50`);
+      const match = findYesOption(output);
+      if (match) {
+        const signature = match.signature;
+        if (state.autoYesSignatures.get(session.id) !== signature) {
+          await sendAutoYes(session.id, signature, match.key, match.type);
+        }
+      }
+    } catch (error) {
+      console.error(`Auto-yes failed for session ${session.name}:`, error);
+    }
+  }
 }
 
 function findYesOption(text) {
@@ -818,26 +1140,87 @@ function stripAnsi(text) {
 }
 
 async function sendInput() {
-  if (!state.selected) {
+  if (selectedRoomForChat()) {
+    await sendRoomInput();
+    return;
+  }
+  const session = currentSelectedSession();
+  if (!session) {
     showError(new Error(t("selectRunning")));
     return;
   }
-  if (state.selected.status !== "running") {
-    showSessionSummary(state.selected);
+  if (session.status !== "running") {
+    showSessionSummary(session);
     return;
   }
   if (!els.input.value.trim()) return;
   try {
-    await api(`/api/sessions/${encodeURIComponent(state.selected.id)}/input`, {
+    await api(`/api/sessions/${encodeURIComponent(session.id)}/input`, {
       method: "POST",
       body: JSON.stringify({ text: els.input.value })
     });
     els.input.value = "";
-    if (state.selected) clearOutputEtag(state.selected.id);
+    clearOutputEtag(session.id);
     resetOutputPolling(500);
   } catch (error) {
     showError(error);
   }
+}
+
+function currentSelectedSession() {
+  if (state.selectedSessionId) {
+    const current = state.sessions.find((session) => session.id === state.selectedSessionId);
+    if (current) {
+      state.selected = current;
+      return current;
+    }
+  }
+  return state.selected;
+}
+
+async function sendRoomInput() {
+  const roomId = state.selectedRoomChatId;
+  if (!roomId) {
+    showError(new Error(t("noRoom")));
+    return;
+  }
+  if (!els.input.value.trim()) return;
+  const target = buildRoomMessageTarget();
+  try {
+    await api(`/api/rooms/${encodeURIComponent(roomId)}/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        text: els.input.value,
+        fromSessionId: state.selected?.id,
+        target,
+        metadata: { source: "web" }
+      })
+    });
+    els.input.value = "";
+    await loadRoomMessages();
+    await refreshSessions();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+function buildRoomMessageTarget() {
+  const mode = state.selectedRoomTargetMode;
+  if (mode === "role") {
+    return { mode: "role", role: state.selectedRoomTargetRole || els.sendTargetRole.value };
+  }
+  if (mode === "session-in-room") {
+    return { mode: "session", sessionIds: [state.selectedRoomTargetSessionId || els.sendTargetSession.value] };
+  }
+  return { mode: "all" };
+}
+
+function sendInputPlaceholder() {
+  if (!selectedRoomForChat()) return t("sendPlaceholder");
+  if (state.selectedRoomTargetMode === "all") return t("roomAll");
+  if (state.selectedRoomTargetMode === "role") return t("roomRole");
+  if (state.selectedRoomTargetMode === "session-in-room") return t("roomSession");
+  return t("sendPlaceholder");
 }
 
 async function sendQuickText(text) {
@@ -940,6 +1323,8 @@ async function deletePendingSession() {
     clearOutputEtag(session.id);
     if (state.selected?.id === session.id) {
       state.selected = null;
+      state.selectedSessionId = "";
+      state.selectionVersion += 1;
       clearOutputPoll();
       els.output.textContent = "";
       els.title.textContent = t("noSession");
@@ -953,9 +1338,32 @@ async function deletePendingSession() {
   }
 }
 
+function openDeleteRoomDialog(room) {
+  state.pendingDeleteRoom = room;
+  els.deleteRoomMessage.textContent = t("deleteRoomConfirm").replace("{name}", room.name);
+  els.deleteRoomDialog.showModal();
+}
+
+async function deletePendingRoom() {
+  const room = state.pendingDeleteRoom;
+  if (!room) return;
+  try {
+    await api(`/api/rooms/${encodeURIComponent(room.id)}`, { method: "DELETE" });
+    state.selectedRoomChatId = "";
+    state.selectedRoomId = "";
+    localStorage.setItem("sessionGatewaySelectedRoomId", "");
+    state.pendingDeleteRoom = null;
+    els.deleteRoomDialog.close();
+    showTerminalView();
+    await refreshSessions();
+  } catch (error) {
+    showError(error);
+  }
+}
+
 function renderQuickKeys() {
   els.quickKeys.innerHTML = "";
-  for (const quickKey of quickKeysForSession(state.selected)) {
+  for (const quickKey of currentQuickKeys()) {
     const button = document.createElement("button");
     button.className = "quick-key";
     button.type = "button";
@@ -964,6 +1372,18 @@ function renderQuickKeys() {
     button.addEventListener("click", () => activateQuickKey(quickKey));
     els.quickKeys.append(button);
   }
+  renderSendTargetControls();
+}
+
+function currentQuickKeys() {
+  if (selectedRoomForChat()) {
+    return [
+      { label: t("roomAll"), type: "room-mode", value: "all" },
+      { label: t("roomRole"), type: "room-mode", value: "role" },
+      { label: t("roomSession"), type: "room-mode", value: "session-in-room" }
+    ];
+  }
+  return quickKeysForSession(state.selected);
 }
 
 function quickKeysForSession(session) {
@@ -990,6 +1410,13 @@ function quickKeysForKind(kind) {
 }
 
 function activateQuickKey(quickKey) {
+  if (quickKey.type === "room-mode") {
+    state.selectedRoomTargetMode = quickKey.value;
+    els.sendTargetMode.value = quickKey.value;
+    renderSendTargetControls();
+    els.input.focus();
+    return;
+  }
   if (quickKey.type === "key") {
     sendQuickKeys([quickKey.value]);
     return;
@@ -1032,6 +1459,10 @@ function loadCustomQuickKeys() {
 
 function renderSessions() {
   els.list.innerHTML = "";
+  const room = selectedRoom();
+  if (room) {
+    els.list.append(renderRoomChatItem(room));
+  }
   const sessions = filteredSessions();
   for (const session of sessions) {
     const membership = selectedRoomMembership(session);
@@ -1063,9 +1494,32 @@ function renderSessions() {
     els.list.append(item);
   }
 
-  if (!sessions.length) {
+  if (!sessions.length && !room) {
     els.list.textContent = "No sessions.";
   }
+}
+
+function renderRoomChatItem(room) {
+  const item = document.createElement("button");
+  item.className = `session-item room-chat-item${state.selectedRoomChatId === room.id ? " active" : ""}`;
+  item.type = "button";
+  const count = room.sessions?.length ?? 0;
+  item.innerHTML = `
+    <span class="session-main">
+      <span class="session-name">${escapeHtml(t("projectGroupChat"))}</span>
+      <span class="session-controls">
+        <span class="task-state in-progress">${escapeHtml(t("roomConversation"))}</span>
+        <button class="session-delete" type="button" title="删除房间">×</button>
+      </span>
+    </span>
+    <span class="session-meta">${escapeHtml(room.name)} · ${escapeHtml(String(count))} ${escapeHtml(t("sessions"))}</span>
+  `;
+  item.addEventListener("click", () => selectRoomChat(room));
+  item.querySelector(".session-delete").addEventListener("click", (event) => {
+    event.stopPropagation();
+    openDeleteRoomDialog(room);
+  });
+  return item;
 }
 
 function filteredSessions() {
@@ -1093,6 +1547,10 @@ function sessionRoomMembership(session, roomId) {
 
 function selectedRoom() {
   return state.rooms.find((room) => room.id === selectedRealRoomId()) ?? null;
+}
+
+function selectedRoomForChat() {
+  return state.rooms.find((room) => room.id === state.selectedRoomChatId) ?? null;
 }
 
 function selectedRealRoomId() {
@@ -1144,13 +1602,22 @@ async function assignRoleFromDialog() {
 }
 
 async function selectSession(session) {
+  state.selectedRoomChatId = "";
   state.selected = session;
+  state.selectedSessionId = session.id;
+  state.selectionVersion += 1;
+  showTerminalView();
   renderSessions();
   renderTaskAlert();
   renderQuickKeys();
   closeSessionsPanel();
   if (session.status === "running") {
     clearOutputEtag(session.id);
+    try {
+      await resizeTerminalForSession(session);
+    } catch (error) {
+      console.warn(error);
+    }
     await loadOutput({ force: true });
     resetOutputPolling(1000);
   } else {
@@ -1159,14 +1626,73 @@ async function selectSession(session) {
   }
 }
 
+async function selectRoomChat(room) {
+  state.selectedRoomChatId = room.id;
+  state.selected = null;
+  state.selectedSessionId = "";
+  state.selectionVersion += 1;
+  clearOutputPoll();
+  renderSessions();
+  renderTaskAlert();
+  renderQuickKeys();
+  renderRoomPanel();
+  closeSessionsPanel();
+  await loadRoomMessages();
+  els.title.textContent = `${t("projectGroupChat")} · ${room.name}`;
+  els.input.focus();
+}
+
+function showTerminalView() {
+  state.selectedRoomChatId = "";
+  els.output.hidden = false;
+  els.roomPanel.hidden = true;
+  els.roomActions.hidden = true;
+  els.addQuickKey.hidden = false;
+  if (!state.selected) {
+    els.title.textContent = t("noSession");
+    state.roomMessages = [];
+    state.selectedSessionId = "";
+    state.selectionVersion += 1;
+  }
+  renderSendTargetControls();
+}
+
 function closeSessionsPanel() {
   els.sessionsPanel.classList.remove("open");
   els.sessionsPanel.setAttribute("aria-hidden", "true");
 }
 
 function openAssistant() {
+  state.assistantRoomContext = null;
   els.runDialog.classList.add("open");
   els.runDialog.setAttribute("aria-hidden", "false");
+  els.runDialog.querySelector(".assistant-subtitle").textContent = "web-pi";
+  renderAssistantMessages();
+}
+
+function openRoomAssistantDialog() {
+  const room = selectedRoomForChat();
+  if (!room) return;
+  const sessions = room.sessions ?? [];
+  const roleSummary = sessions
+    .map((s) => `${s.sessionName}(${s.role || s.rolePresetLabel || "agent"})`)
+    .join(", ");
+  state.assistantRoomContext = {
+    roomId: room.id,
+    roomName: room.name,
+    project: room.project,
+    objective: room.objective,
+    sessions: sessions.map((s) => ({
+      sessionId: s.sessionId,
+      sessionName: s.sessionName,
+      role: s.role || s.rolePresetLabel || null,
+      status: s.sessionStatus
+    }))
+  };
+  state.assistantMessages = [];
+  els.runDialog.classList.add("open");
+  els.runDialog.setAttribute("aria-hidden", "false");
+  els.runDialog.querySelector(".assistant-subtitle").textContent = `${t("roomAssistantSubtitle")} · ${room.name}`;
   renderAssistantMessages();
 }
 
@@ -1191,7 +1717,8 @@ function appendAssistantMessage(role, text) {
 function renderAssistantMessages() {
   if (!els.assistantMessages) return;
   if (!state.assistantMessages.length) {
-    els.assistantMessages.innerHTML = `<div class="assistant-empty">${escapeHtml(t("assistantEmpty"))}</div>`;
+    const emptyText = state.assistantRoomContext ? t("roomAssistantEmpty") : t("assistantEmpty");
+    els.assistantMessages.innerHTML = `<div class="assistant-empty">${escapeHtml(emptyText)}</div>`;
     return;
   }
   els.assistantMessages.innerHTML = state.assistantMessages
@@ -1333,8 +1860,15 @@ function applyLanguage() {
   els.roomProject.placeholder = text.projectPlaceholder;
   els.roomObjective.placeholder = text.roomObjectivePlaceholder;
   els.nl.placeholder = text.nlPlaceholder;
+  els.sendTargetMode.options[0].textContent = text.roomAll;
+  els.sendTargetMode.options[1].textContent = text.roomRole;
+  els.sendTargetMode.options[2].textContent = text.roomSession;
+  els.refreshRoomMessages.textContent = text.refresh;
+  document.querySelector("#confirm-delete-room").textContent = text.delete;
   renderRoomControls();
   renderRolePresetControls();
+  renderRoomPanel();
+  renderSendTargetControls();
   renderAssistantMessages();
   if (!state.selected) els.title.textContent = text.noSession;
 }
@@ -1411,7 +1945,8 @@ function sessionDeploymentLabel(session) {
 }
 
 async function refreshSelectedOutput() {
-  if (document.hidden || !state.selected || state.selected.status !== "running") {
+  const selected = currentSelectedSession();
+  if (document.hidden || !selected || selected.status !== "running") {
     clearOutputPoll();
     return;
   }
@@ -1438,7 +1973,8 @@ function updateOutputPollDelay(changed) {
 
 function scheduleOutputPoll(delayMs) {
   clearOutputPoll();
-  if (document.hidden || !state.selected || state.selected.status !== "running") return;
+  const selected = currentSelectedSession();
+  if (document.hidden || !selected || selected.status !== "running") return;
   state.outputPollTimer = setTimeout(refreshSelectedOutput, delayMs);
 }
 
@@ -1499,6 +2035,94 @@ function renderTaskAlert() {
   els.confirmAlert.hidden = false;
   els.confirmAlert.textContent = t("confirmAlert").replace("{name}", session.name);
   els.confirmAlert.title = session.name;
+}
+
+function sessionsNeedingConfirmationInRoom(roomId) {
+  if (!roomId) return [];
+  return state.sessions.filter(
+    (session) => session.taskState === "needs_confirmation" && sessionHasRoom(session, roomId)
+  );
+}
+
+function renderReviewButtons() {
+  const roomId = state.selectedRoomChatId;
+  const sessions = sessionsNeedingConfirmationInRoom(roomId);
+  
+  if (!roomId || sessions.length === 0) {
+    els.reviewButtons.hidden = true;
+    els.reviewButtons.innerHTML = "";
+    return;
+  }
+  
+  els.reviewButtons.hidden = false;
+  els.reviewButtons.innerHTML = sessions.map((session) => 
+    `<button class="review-btn" data-session-id="${escapeHtml(session.id)}" type="button">${escapeHtml(session.name)}</button>`
+  ).join("");
+  
+  els.reviewButtons.querySelectorAll(".review-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const sessionId = btn.dataset.sessionId;
+      openReviewDialog(sessionId);
+    });
+  });
+}
+
+async function openReviewDialog(sessionId) {
+  const session = state.sessions.find((s) => s.id === sessionId);
+  if (!session) return;
+  
+  state.reviewingSessionId = sessionId;
+  
+  els.reviewSessionInfo.innerHTML = `
+    <div class="session-name">${escapeHtml(session.name)}</div>
+    <div class="session-status">状态：待审核</div>
+    <div>类型：${escapeHtml(session.kind)}</div>
+    ${session.project ? `<div>项目：${escapeHtml(session.project)}</div>` : ""}
+    <div class="session-output-label">最近输出：</div>
+    <div class="session-output-loading">加载中...</div>
+  `;
+  
+  els.reviewDialog.showModal();
+  
+  try {
+    const output = await api(`/api/sessions/${encodeURIComponent(sessionId)}/output?lines=15`);
+    const outputContainer = els.reviewSessionInfo.querySelector(".session-output-loading");
+    if (outputContainer) {
+      outputContainer.className = "session-output-content";
+      outputContainer.textContent = output || "（无输出）";
+    }
+  } catch (error) {
+    const outputContainer = els.reviewSessionInfo.querySelector(".session-output-loading");
+    if (outputContainer) {
+      outputContainer.className = "session-output-error";
+      outputContainer.textContent = `加载失败：${error.message}`;
+    }
+  }
+}
+
+async function sendQuickReview(value) {
+  const sessionId = state.reviewingSessionId;
+  if (!sessionId) return;
+  
+  const session = state.sessions.find((s) => s.id === sessionId);
+  if (!session || session.status !== "running") {
+    showError(new Error("会话未运行"));
+    return;
+  }
+  
+  try {
+    await api(`/api/sessions/${encodeURIComponent(sessionId)}/input`, {
+      method: "POST",
+      body: JSON.stringify({ text: value })
+    });
+    
+    state.reviewingSessionId = null;
+    els.reviewDialog.close();
+    
+    await refreshSessions();
+  } catch (error) {
+    showError(error);
+  }
 }
 
 function markSelectedTaskState(taskState) {

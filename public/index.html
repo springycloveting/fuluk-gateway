@@ -15,10 +15,7 @@
         </div>
         <div class="actions">
           <button id="confirm-alert" class="confirm-alert" type="button" hidden>需要确认</button>
-          <label class="topbar-check">
-            <input id="all-yes" type="checkbox" />
-            <span data-i18n="allYes">All Yes</span>
-          </label>
+          <button id="all-yes" class="all-yes-btn" type="button" data-state="off">All Yes</button>
           <button id="open-history" class="ghost" type="button">历史</button>
           <button id="open-create" class="ghost" type="button">新建</button>
           <button id="open-run" class="ghost" type="button">助手</button>
@@ -29,9 +26,30 @@
       </header>
 
       <section class="terminal">
+        <section id="room-panel" class="room-panel" hidden>
+          <div class="room-panel-head">
+            <div>
+              <h2 id="room-title">Room</h2>
+              <p id="room-subtitle"></p>
+            </div>
+          </div>
+          <div id="room-messages" class="room-messages"></div>
+        </section>
         <pre id="output"></pre>
         <div class="quick-key-row">
           <div id="quick-keys" class="quick-keys" aria-label="快捷键"></div>
+          <div id="room-actions" class="room-actions" hidden>
+            <button id="open-room-assistant" class="ghost" type="button">群聊助手</button>
+            <select id="send-target-mode" title="发送目标">
+              <option value="all">房间全员</option>
+              <option value="role">按角色</option>
+              <option value="session-in-room">房间会话</option>
+            </select>
+            <select id="send-target-role" title="角色" hidden></select>
+            <select id="send-target-session" title="会话" hidden></select>
+            <button id="refresh-room-messages" class="ghost" type="button">刷新</button>
+          </div>
+          <div id="review-buttons" class="review-buttons" hidden></div>
           <button id="add-quick-key" class="quick-key-add" type="button" title="添加快捷键">+</button>
         </div>
         <div class="input-row">
@@ -200,6 +218,22 @@
         </form>
       </dialog>
 
+      <dialog id="review-dialog">
+        <form id="review-form" class="dialog-form">
+          <div class="dialog-head">
+            <h2>快捷审核</h2>
+            <button class="ghost" data-close-dialog="review-dialog" type="button" data-i18n="close">关闭</button>
+          </div>
+          <div id="review-session-info" class="review-session-info"></div>
+          <div class="review-quick-buttons">
+            <button type="button" class="review-quick-btn" data-value="1">1</button>
+            <button type="button" class="review-quick-btn" data-value="2">2</button>
+            <button type="button" class="review-quick-btn" data-value="3">3</button>
+            <button type="button" class="review-quick-btn" data-value="4">4</button>
+          </div>
+        </form>
+      </dialog>
+
       <dialog id="history-dialog">
         <form id="history-form" class="dialog-form history-dialog-form">
           <div class="dialog-head">
@@ -207,6 +241,20 @@
             <button class="ghost" data-close-dialog="history-dialog" type="button" data-i18n="close">关闭</button>
           </div>
           <div id="history-list" class="history-list"></div>
+        </form>
+      </dialog>
+
+      <dialog id="delete-room-dialog">
+        <form id="delete-room-form" class="dialog-form">
+          <div class="dialog-head">
+            <h2 data-i18n="deleteRoomTitle">删除房间</h2>
+            <button class="ghost" data-close-dialog="delete-room-dialog" type="button" data-i18n="close">关闭</button>
+          </div>
+          <p id="delete-room-message" class="dialog-message"></p>
+          <div class="dialog-actions">
+            <button class="ghost" data-close-dialog="delete-room-dialog" type="button" data-i18n="cancel">取消</button>
+            <button id="confirm-delete-room" class="danger" type="submit" data-i18n="delete">删除</button>
+          </div>
         </form>
       </dialog>
     </main>

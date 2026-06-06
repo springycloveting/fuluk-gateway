@@ -27,11 +27,17 @@ test("session agent exposes only Session Gateway tools and returns session lists
   assert.deepEqual(
     fake.state.tools.map((tool) => tool.name).sort(),
     [
+      "assign_session_to_room",
+      "create_room",
       "create_session",
+      "get_room",
       "get_session_output",
+      "list_room_messages",
+      "list_rooms",
       "list_sessions",
       "restart_session",
       "send_keys_to_session",
+      "send_room_message",
       "send_to_session",
       "stop_session",
       "summarize_session_states",
@@ -182,6 +188,24 @@ function createOperations(overrides = {}) {
     },
     async summarize_session_states() {
       return "{}";
+    },
+    async list_rooms() {
+      return { rooms: [] };
+    },
+    async create_room() {
+      return { room: null };
+    },
+    async get_room() {
+      return { room: null };
+    },
+    async assign_session_to_room() {
+      return { room: null, membership: null, session: null };
+    },
+    async send_room_message() {
+      return { message: null };
+    },
+    async list_room_messages() {
+      return { room: null, messages: [] };
     },
     ...overrides
   };

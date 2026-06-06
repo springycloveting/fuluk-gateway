@@ -214,6 +214,87 @@ test("/api/nl output can target a session by list position", async () => {
   assert.deepEqual(saved, [{ sessionId: "session-3", lines: 50, text: "third output" }]);
 });
 
+test("/api/sessions/:id/resize resizes only the selected session", async () => {
+  const session = {
+    id: "session-1",
+    name: "main",
+    kind: "opencode",
+    status: "running",
+    cwd: "/workspace/app",
+    tmuxSessionName: "session-1"
+  };
+  const resized = [];
+  const touched = [];
+  const { statusCode, body } = await postJson(
+    "/api/sessions/main/resize",
+    { cols: 132, rows: 40 },
+    {
+      config: {
+        authToken: "secret",
+        allowRuntimeMode: true,
+        runtimeSettings: {},
+        runtimeSettingsEnabled: false
+      },
+      store: {
+        findByIdOrName(value) {
+          return value === session.id || value === session.name ? session : null;
+        },
+        touch(sessionId) {
+          touched.push(sessionId);
+        }
+      },
+      tmux: {
+        async resize(record, cols, rows) {
+          resized.push({ sessionId: record.id, cols, rows });
+        }
+      }
+    }
+  );
+
+  assert.equal(statusCode, 200);
+  assert.deepEqual(JSON.parse(body), { ok: true });
+  assert.deepEqual(resized, [{ sessionId: "session-1", cols: 132, rows: 40 }]);
+  assert.deepEqual(touched, ["session-1"]);
+});
+
+test("/api/sessions/:id/resize rejects invalid terminal sizes", async () => {
+  const session = {
+    id: "session-1",
+    name: "main",
+    kind: "opencode",
+    status: "running",
+    cwd: "/workspace/app",
+    tmuxSessionName: "session-1"
+  };
+  const resized = [];
+  const { statusCode, body } = await postJson(
+    "/api/sessions/main/resize",
+    { cols: 10, rows: 40 },
+    {
+      config: {
+        authToken: "secret",
+        allowRuntimeMode: true,
+        runtimeSettings: {},
+        runtimeSettingsEnabled: false
+      },
+      store: {
+        findByIdOrName(value) {
+          return value === session.id || value === session.name ? session : null;
+        }
+      },
+      tmux: {
+        async resize(record, cols, rows) {
+          resized.push({ sessionId: record.id, cols, rows });
+        }
+      }
+    }
+  );
+
+  assert.equal(statusCode, 400);
+  assert.match(JSON.parse(body).error, /cols must be an integer/);
+  assert.deepEqual(resized, []);
+});
+
 test("/api/nl send can target a named session through the submitting send path", async () => {
   const glassSession = {
     id: "session-glass",
@@ -965,6 +1046,7 @@ test("/api/rooms creates rooms and associates existing sessions with roles", asy
     sessions: []
   };
   const context = createCreateSessionContext({ records: [] });
+  context.config.publicBaseUrl = "http://gateway.example";
   context.store = {
     listRooms() {
       return [room];
@@ -1066,7 +1148,7 @@ test("/api/sessions injects role preset prompt when creating a room session", as
   });
   context.store.saveInput = (sessionId, text) => calls.push({ type: "saveInput", sessionId, text });
   context.store.touch = (sessionId) => calls.push({ type: "touch", sessionId });
-  context.tmux.send = async (session, text) => calls.push({ type: "send", sessionId: session.id, text });
+  context.tmux.send = async (session, text, options = {}) => calls.push({ type: "send", sessionId: session.id, text, options });
 
   const { statusCode, body } = await postJson("/api/sessions", {
     kind: "runtime",
@@ -1082,6 +1164,162 @@ test("/api/sessions injects role preset prompt when creating a room session", as
   assert.doesNotMatch(calls[0].text, /capability guidance|direct permissions/i);
   assert.match(calls[0].text, /senior code reviewer/);
   assert.deepEqual(calls.map((call) => call.type), ["send", "saveInput", "touch"]);
+});
+
+test("/api/rooms/:id/messages sends a room message to matching running role sessions", async () => {
+  const calls = [];
+  const deliveries = [];
+  const messages = [];
+  const sessions = [
+    { id: "planner-1", name: "planner", kind: "codex", status: "running", cwd: "/workspace" },
+    { id: "reviewer-1", name: "reviewer", kind: "codex", status: "running", cwd: "/workspace" },
+    { id: "stopped-1", name: "stopped-reviewer", kind: "codex", status: "stopped", cwd: "/workspace" }
+  ];
+  const room = {
+    id: "room-1",
+    name: "launch",
+    sessions: [
+      { roomId: "room-1", sessionId: "planner-1", sessionName: "planner", sessionStatus: "running", role: "planner" },
+      { roomId: "room-1", sessionId: "reviewer-1", sessionName: "reviewer", sessionStatus: "running", role: "reviewer" },
+      { roomId: "room-1", sessionId: "stopped-1", sessionName: "stopped-reviewer", sessionStatus: "stopped", role: "reviewer" }
+    ]
+  };
+  const context = createCreateSessionContext({ records: [] });
+  context.store = {
+    getRoom(id) {
+      return id === room.id ? room : null;
+    },
+    createRoomMessage(input) {
+      const message = {
+        id: "message-1",
+        roomId: input.roomId,
+        fromSessionId: input.fromSessionId,
+        fromSessionName: "planner",
+        targetMode: input.targetMode,
+        targetRole: input.targetRole,
+        targetSessionIds: input.targetSessionIds,
+        text: input.text,
+        metadata: input.metadata ?? {},
+        createdAt: "2026-06-03T00:00:00.000Z",
+        deliveries: []
+      };
+      messages.push(message);
+      return message;
+    },
+    addRoomMessageDelivery(messageId, sessionId) {
+      const delivery = { id: deliveries.length + 1, messageId, sessionId, status: "pending" };
+      deliveries.push(delivery);
+      return delivery;
+    },
+    updateRoomMessageDelivery(id, status, error = null) {
+      const delivery = deliveries.find((item) => item.id === id);
+      delivery.status = status;
+      delivery.error = error;
+      return delivery;
+    },
+    getRoomMessage(id) {
+      const message = messages.find((item) => item.id === id);
+      return { ...message, deliveries };
+    },
+    listRoomMessages() {
+      return messages.map((message) => ({ ...message, deliveries }));
+    },
+    findByIdOrName(id) {
+      return sessions.find((session) => session.id === id || session.name === id) ?? null;
+    },
+    saveInput(sessionId, text) {
+      calls.push({ type: "saveInput", sessionId, text });
+    },
+    touch(sessionId) {
+      calls.push({ type: "touch", sessionId });
+    }
+  };
+  context.tmux.send = async (session, text, options = {}) => calls.push({ type: "send", sessionId: session.id, text, options });
+
+  const { statusCode, body } = await postJson("/api/rooms/room-1/messages", {
+    fromSessionId: "planner-1",
+    text: "Please review the plan",
+    target: { mode: "role", role: "reviewer" }
+  }, context);
+
+  assert.equal(statusCode, 201);
+  const parsed = JSON.parse(body);
+  assert.equal(parsed.message.targetRole, "reviewer");
+  assert.deepEqual(deliveries.map((delivery) => [delivery.sessionId, delivery.status]), [["reviewer-1", "sent"]]);
+  const sendCall = calls.find((call) => call.type === "send");
+  assert.equal(sendCall.sessionId, "reviewer-1");
+  assert.ok(sendCall.options.submitKeyDelayMs >= 600);
+  assert.match(sendCall.text, /\[Room: launch\]/);
+  assert.match(sendCall.text, /\[From: planner\]/);
+  assert.match(sendCall.text, /System instruction: This is a room task/);
+  assert.match(sendCall.text, /POST http:\/\/127\.0\.0\.1:8787\/api\/rooms\/room-1\/messages/);
+  assert.match(sendCall.text, /Authorization: Bearer secret/);
+  assert.match(sendCall.text, /"fromSessionId":"reviewer-1"/);
+  assert.match(sendCall.text, /"parentMessageId":"message-1"/);
+  assert.match(sendCall.text, /"target":\{"mode":"room"\}/);
+  assert.match(sendCall.text, /\[DONE\].*\[FAIL\].*\[BLOCKED\].*\[BUG\]/s);
+  assert.match(sendCall.text, /Please review the plan/);
+  assert.deepEqual(calls.map((call) => call.type), ["send", "saveInput", "touch"]);
+});
+
+test("/api/rooms/:id/messages records agent results without re-delivering them", async () => {
+  const calls = [];
+  const messages = [];
+  const room = {
+    id: "room-1",
+    name: "launch",
+    sessions: [
+      { roomId: "room-1", sessionId: "planner-1", sessionName: "planner", sessionStatus: "running", role: "planner" },
+      { roomId: "room-1", sessionId: "reviewer-1", sessionName: "reviewer", sessionStatus: "running", role: "reviewer" }
+    ]
+  };
+  const context = createCreateSessionContext({ records: [] });
+  context.store = {
+    getRoom(id) {
+      return id === room.id ? room : null;
+    },
+    createRoomMessage(input) {
+      const message = {
+        id: "result-1",
+        roomId: input.roomId,
+        fromSessionId: input.fromSessionId,
+        fromSessionName: "reviewer",
+        targetMode: input.targetMode,
+        targetRole: input.targetRole,
+        targetSessionIds: input.targetSessionIds,
+        text: input.text,
+        metadata: input.metadata ?? {},
+        createdAt: "2026-06-03T00:00:00.000Z",
+        deliveries: []
+      };
+      messages.push(message);
+      return message;
+    },
+    getRoomMessage(id) {
+      return messages.find((item) => item.id === id) ?? null;
+    },
+    findByIdOrName() {
+      return null;
+    },
+    addRoomMessageDelivery() {
+      throw new Error("agent result should not create deliveries");
+    }
+  };
+  context.tmux.send = async () => calls.push({ type: "send" });
+
+  const { statusCode, body } = await postJson("/api/rooms/room-1/messages", {
+    fromSessionId: "reviewer-1",
+    text: "[DONE] reviewed",
+    target: { mode: "room" },
+    metadata: { source: "agent-result", parentMessageId: "message-1" }
+  }, context);
+
+  assert.equal(statusCode, 201);
+  const parsed = JSON.parse(body);
+  assert.equal(parsed.message.text, "[DONE] reviewed");
+  assert.equal(parsed.message.targetMode, "room");
+  assert.equal(parsed.message.metadata.source, "agent-result");
+  assert.deepEqual(calls, []);
 });
 
 test("security headers are added to responses", async () => {

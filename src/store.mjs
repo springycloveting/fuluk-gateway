@@ -147,6 +147,7 @@ export class SessionStore {
   }
 
   delete(id) {
+    this.db.prepare("delete from room_message_deliveries where session_id = ?").run(id);
     this.db.prepare("delete from room_sessions where session_id = ?").run(id);
     this.db.prepare("delete from input_history where session_id = ?").run(id);
     this.db.prepare("delete from output_snapshots where session_id = ?").run(id);
@@ -220,6 +221,16 @@ export class SessionStore {
     return row ? this.withRoomSessions(mapRoomRow(row)) : null;
   }
 
+  deleteRoom(roomId) {
+    const room = this.getRoom(roomId);
+    if (!room) return false;
+    this.db.prepare("delete from room_message_deliveries where message_id in (select id from room_messages where room_id = ?)").run(room.id);
+    this.db.prepare("delete from room_messages where room_id = ?").run(room.id);
+    this.db.prepare("delete from room_sessions where room_id = ?").run(room.id);
+    this.db.prepare("delete from rooms where id = ?").run(room.id);
+    return true;
+  }
+
   assignSessionToRoom(roomId, sessionId, role = null, options = {}) {
     const room = this.getRoom(roomId);
     if (!room) throw new Error(`Room not found: ${roomId}`);
@@ -230,6 +241,10 @@ export class SessionStore {
     if (options.rolePresetId && !preset) throw new Error(`Role preset not found: ${options.rolePresetId}`);
     const normalizedRole = normalizeRole(role) ?? preset?.label ?? preset?.name ?? null;
     const rolePrompt = normalizeRolePrompt(options.rolePrompt ?? preset?.prompt);
+    const previousRooms = this.listSessionRooms(session.id)
+      .filter((membership) => membership.roomId !== room.id)
+      .map((membership) => membership.roomId);
+    this.db.prepare("delete from room_sessions where session_id = ? and room_id != ?").run(session.id, room.id);
     this.db
       .prepare(
         `insert into room_sessions (room_id, session_id, role, role_preset_id, role_prompt, created_at, updated_at)
@@ -241,6 +256,7 @@ export class SessionStore {
            updated_at = excluded.updated_at`
       )
       .run(room.id, session.id, normalizedRole, preset?.id ?? null, rolePrompt, timestamp, timestamp);
+    for (const previousRoomId of previousRooms) this.touchRoom(previousRoomId);
     this.touchRoom(room.id);
     return this.getRoomSession(room.id, session.id);
   }
@@ -313,6 +329,119 @@ export class SessionStore {
     this.db.prepare("update rooms set updated_at = ? where id = ?").run(nowIso(), roomId);
   }
 
+  createRoomMessage(input = {}) {
+    const room = this.getRoom(input.roomId);
+    if (!room) throw new Error(`Room not found: ${input.roomId}`);
+    if (input.fromSessionId && !this.findByIdOrName(input.fromSessionId)) {
+      throw new Error(`Session not found: ${input.fromSessionId}`);
+    }
+    const text = normalizeMessageText(input.text);
+    const timestamp = nowIso();
+    const message = {
+      id: newId(),
+      roomId: room.id,
+      fromSessionId: input.fromSessionId ?? null,
+      targetMode: input.targetMode ?? "all",
+      targetRole: input.targetRole ?? null,
+      targetSessionIds: Array.isArray(input.targetSessionIds) ? input.targetSessionIds : [],
+      text,
+      metadata: input.metadata && typeof input.metadata === "object" ? input.metadata : {},
+      createdAt: timestamp
+    };
+    this.db
+      .prepare(
+        `insert into room_messages (
+          id, room_id, from_session_id, target_mode, target_role, target_session_ids_json, text, metadata_json, created_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        message.id,
+        message.roomId,
+        message.fromSessionId,
+        message.targetMode,
+        message.targetRole,
+        JSON.stringify(message.targetSessionIds),
+        message.text,
+        JSON.stringify(message.metadata),
+        message.createdAt
+      );
+    this.touchRoom(room.id);
+    return this.getRoomMessage(message.id);
+  }
+
+  addRoomMessageDelivery(messageId, sessionId, status = "pending", error = null) {
+    const timestamp = nowIso();
+    const result = this.db
+      .prepare(
+        `insert into room_message_deliveries (message_id, session_id, status, error, created_at, updated_at)
+         values (?, ?, ?, ?, ?, ?)`
+      )
+      .run(messageId, sessionId, status, error, timestamp, timestamp);
+    return this.getRoomMessageDelivery(Number(result.lastInsertRowid));
+  }
+
+  updateRoomMessageDelivery(id, status, error = null) {
+    this.db
+      .prepare("update room_message_deliveries set status = ?, error = ?, updated_at = ? where id = ?")
+      .run(status, error, nowIso(), id);
+    return this.getRoomMessageDelivery(id);
+  }
+
+  getRoomMessageDelivery(id) {
+    const row = this.db
+      .prepare(
+        `select d.*, s.name as session_name, s.kind as session_kind, s.status as session_status
+         from room_message_deliveries d
+         join sessions s on s.id = d.session_id
+         where d.id = ?`
+      )
+      .get(id);
+    return row ? mapRoomMessageDeliveryRow(row) : null;
+  }
+
+  getRoomMessage(id) {
+    const row = this.db
+      .prepare(
+        `select m.*, s.name as from_session_name
+         from room_messages m
+         left join sessions s on s.id = m.from_session_id
+         where m.id = ?`
+      )
+      .get(id);
+    return row ? this.withRoomMessageDeliveries(mapRoomMessageRow(row)) : null;
+  }
+
+  listRoomMessages(roomId, limit = 100) {
+    const room = this.getRoom(roomId);
+    if (!room) throw new Error(`Room not found: ${roomId}`);
+    const rows = this.db
+      .prepare(
+        `select m.*, s.name as from_session_name
+         from room_messages m
+         left join sessions s on s.id = m.from_session_id
+         where m.room_id = ?
+         order by m.created_at desc, m.id desc
+         limit ?`
+      )
+      .all(room.id, Math.min(Math.max(Number(limit) || 100, 1), 500));
+    return rows.map((row) => this.withRoomMessageDeliveries(mapRoomMessageRow(row))).reverse();
+  }
+
+  withRoomMessageDeliveries(message) {
+    if (!message) return null;
+    const deliveries = this.db
+      .prepare(
+        `select d.*, s.name as session_name, s.kind as session_kind, s.status as session_status
+         from room_message_deliveries d
+         join sessions s on s.id = d.session_id
+         where d.message_id = ?
+         order by d.created_at asc, d.id asc`
+      )
+      .all(message.id)
+      .map(mapRoomMessageDeliveryRow);
+    return { ...message, deliveries };
+  }
+
   withSessionRooms(session) {
     if (!session) return null;
     return { ...session, rooms: this.listSessionRooms(session.id) };
@@ -375,6 +504,28 @@ export class SessionStore {
         primary key (room_id, session_id)
       );
 
+      create table if not exists room_messages (
+        id text primary key,
+        room_id text not null references rooms(id) on delete cascade,
+        from_session_id text references sessions(id) on delete set null,
+        target_mode text not null,
+        target_role text,
+        target_session_ids_json text not null,
+        text text not null,
+        metadata_json text not null,
+        created_at text not null
+      );
+
+      create table if not exists room_message_deliveries (
+        id integer primary key autoincrement,
+        message_id text not null references room_messages(id) on delete cascade,
+        session_id text not null references sessions(id) on delete cascade,
+        status text not null,
+        error text,
+        created_at text not null,
+        updated_at text not null
+      );
+
       create table if not exists role_presets (
         id text primary key,
         name text not null unique,
@@ -401,6 +552,12 @@ export class SessionStore {
 
       create index if not exists idx_room_sessions_session_id
         on room_sessions(session_id);
+
+      create index if not exists idx_room_messages_room_created
+        on room_messages(room_id, created_at desc);
+
+      create index if not exists idx_room_message_deliveries_message_id
+        on room_message_deliveries(message_id);
     `);
     this.ensureColumn("room_sessions", "role_preset_id", "text references role_presets(id) on delete set null");
     this.ensureColumn("room_sessions", "role_prompt", "text");
@@ -499,6 +656,11 @@ function normalizeRolePrompt(prompt) {
   return normalized || null;
 }
 
+function normalizeMessageText(text) {
+  if (typeof text !== "string" || !text.trim()) throw new Error("message text is required");
+  return text.trim();
+}
+
 function mapRoomRow(row) {
   return {
     id: row.id,
@@ -527,6 +689,36 @@ function mapRoomSessionRow(row) {
     rolePresetLabel: row.role_preset_label,
     rolePresetDescription: row.role_preset_description,
     rolePrompt: row.role_prompt,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapRoomMessageRow(row) {
+  return {
+    id: row.id,
+    roomId: row.room_id,
+    fromSessionId: row.from_session_id,
+    fromSessionName: row.from_session_name,
+    targetMode: row.target_mode,
+    targetRole: row.target_role,
+    targetSessionIds: JSON.parse(row.target_session_ids_json || "[]"),
+    text: row.text,
+    metadata: JSON.parse(row.metadata_json || "{}"),
+    createdAt: row.created_at
+  };
+}
+
+function mapRoomMessageDeliveryRow(row) {
+  return {
+    id: Number(row.id),
+    messageId: row.message_id,
+    sessionId: row.session_id,
+    sessionName: row.session_name,
+    sessionKind: row.session_kind,
+    sessionStatus: row.session_status,
+    status: row.status,
+    error: row.error,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };

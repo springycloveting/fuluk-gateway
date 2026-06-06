@@ -6,13 +6,22 @@ const DEFAULT_MODEL_SPEC = "openai:gpt-5.2";
 const SYSTEM_PROMPT = [
   "You are web-pi, the Session Gateway middle-layer assistant.",
   "The /api/nl endpoint sends user messages to you. Backend tool results are also sent back to you so you can produce the final user-facing answer.",
-  "You can only operate Session Gateway sessions through the provided tools.",
+  "You can only operate Session Gateway sessions and rooms through the provided tools.",
   "You do not have shell, filesystem, project search, delete, or network tools. Refuse requests for those capabilities.",
   "Before acting, prefer checking current session state when the target or state is ambiguous.",
   "If the user clearly asks for a side-effect action such as stop, restart, create, switch, send text, or confirm permission, execute it with the appropriate tool.",
   "For stop requests that mention idle or completed sessions, only stop sessions whose taskState is completed unless the user names a specific target.",
   "When a session has needs_confirmation and the user asks to confirm, send Enter or a safe visible option with send_keys_to_session.",
   "When the user asks to summarize a session, read the needed output with get_session_output and summarize it in your final answer. Do not ask the user to inspect raw output.",
+  "",
+  "Room capabilities:",
+  "- Use list_rooms to see all rooms and their member sessions.",
+  "- Use create_room to create a new room for coordinating multiple sessions.",
+  "- Use assign_session_to_room to add a session to a room with an optional role.",
+  "- Use send_room_message to broadcast a message to all/role-specific/specific sessions in a room.",
+  "- Use list_room_messages to see the message history in a room.",
+  "- When the user asks to coordinate sessions or run multi-agent workflows, suggest using rooms.",
+  "",
   "Never answer only with generic text such as '操作已完成' when backend output is available. Use the backend output to answer the user's actual request.",
   "Keep final answers concise and mention the concrete sessions you acted on.",
   "IMPORTANT: Be extremely concise. Answer in 1-3 sentences max. No explanations or elaborations unless explicitly asked. Direct answers only."
@@ -72,7 +81,9 @@ export function createSessionAgentManager(context, operations, options = {}) {
           currentAgent.state.tools = createSessionAgentTools(operations);
         }
         if (typeof currentAgent.state?.systemPrompt === "string") {
-          currentAgent.state.systemPrompt = `${SYSTEM_PROMPT}\n\nCurrent session state:\n${await operations.summarize_session_states()}`;
+          const sessionState = await operations.summarize_session_states();
+          const roomPrompt = buildRoomContextPrompt(request.roomContext);
+          currentAgent.state.systemPrompt = `${SYSTEM_PROMPT}\n${roomPrompt}\n\nCurrent session state:\n${sessionState}`;
         }
         await currentAgent.prompt(buildUserPrompt(text, request));
         await synthesizeBackendOutput(currentAgent, text, request, actions);
@@ -124,7 +135,41 @@ function createSessionAgentTools(operations) {
     tool("Summarize Session States", "summarize_session_states", "Read-only summary of sessions by task state.", {}, async () => {
       const summary = await operations.summarize_session_states();
       return { summary };
-    })
+    }),
+    tool("List Rooms", "list_rooms", "List all rooms and their member sessions.", {}, operations.list_rooms),
+    tool("Create Room", "create_room", "Create a new room for coordinating multiple sessions.", {
+      name: Type.String({ minLength: 1 }),
+      objective: Type.Optional(Type.String()),
+      project: Type.Optional(Type.String())
+    }, operations.create_room),
+    tool("Get Room", "get_room", "Get room details including member sessions.", {
+      roomId: Type.Optional(Type.String()),
+      roomName: Type.Optional(Type.String())
+    }, operations.get_room),
+    tool("Assign Session to Room", "assign_session_to_room", "Add a session to a room with an optional role.", {
+      roomId: Type.Optional(Type.String()),
+      roomName: Type.Optional(Type.String()),
+      sessionId: Type.Optional(Type.String()),
+      sessionName: Type.Optional(Type.String()),
+      role: Type.Optional(Type.String()),
+      rolePresetId: Type.Optional(Type.String()),
+      rolePrompt: Type.Optional(Type.String()),
+      injectRolePrompt: Type.Optional(Type.Boolean())
+    }, operations.assign_session_to_room),
+    tool("Send Room Message", "send_room_message", "Send a message to sessions in a room. Target mode can be 'all', 'role', or 'session'.", {
+      roomId: Type.Optional(Type.String()),
+      roomName: Type.Optional(Type.String()),
+      text: Type.String({ minLength: 1 }),
+      targetMode: Type.Optional(Type.String({ description: "all, role, or session" })),
+      targetRole: Type.Optional(Type.String()),
+      targetSessionIds: Type.Optional(Type.Array(Type.String())),
+      fromSessionId: Type.Optional(Type.String())
+    }, operations.send_room_message),
+    tool("List Room Messages", "list_room_messages", "Get message history for a room.", {
+      roomId: Type.Optional(Type.String()),
+      roomName: Type.Optional(Type.String()),
+      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 500 }))
+    }, operations.list_room_messages)
   ];
 }
 
@@ -166,6 +211,31 @@ function buildUserPrompt(text, request) {
     "Use tools when the request asks about or changes Session Gateway sessions.",
     "After tools return backend output, answer the user's actual request from that output."
   ].join("\n");
+}
+
+function buildRoomContextPrompt(roomContext) {
+  if (!roomContext || typeof roomContext !== "object") return "";
+  const lines = [
+    "",
+    "## Room Context (Group Chat Mode)",
+    `You are operating as the room assistant for room "${roomContext.roomName}".`,
+  ];
+  if (roomContext.project) lines.push(`Project: ${roomContext.project}`);
+  if (roomContext.objective) lines.push(`Objective: ${roomContext.objective}`);
+  if (Array.isArray(roomContext.sessions) && roomContext.sessions.length) {
+    lines.push("");
+    lines.push("Room member sessions:");
+    for (const s of roomContext.sessions) {
+      const role = s.role ? ` [${s.role}]` : "";
+      const status = s.status === "running" ? "●" : "○";
+      lines.push(`  ${status} ${s.sessionName}${role}`);
+    }
+    lines.push("");
+    lines.push("When the user asks to send a task or message to the room, use send_room_message.");
+    lines.push("When the user asks to assign a role, use assign_session_to_room.");
+    lines.push("Prefer using room-scoped operations over individual session operations.");
+  }
+  return lines.join("\n");
 }
 
 function buildBackendOutputPrompt(text, request, actions) {
