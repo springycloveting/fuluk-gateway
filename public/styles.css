@@ -361,6 +361,144 @@ h2 {
   margin: 2px 0 0;
 }
 
+.workflow-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.workflow-tabs button.active {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.workflow-board {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workflow-board[hidden] {
+  display: none;
+}
+
+.workflow-board-head {
+  align-items: center;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 12px;
+}
+
+.workflow-board-head div,
+.workflow-gates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.workflow-content {
+  display: grid;
+  gap: 10px;
+  overflow: auto;
+  padding: 12px;
+}
+
+.workflow-run,
+.workflow-item {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.workflow-run > header,
+.workflow-item > header {
+  align-items: flex-start;
+  display: flex;
+  justify-content: space-between;
+}
+
+.workflow-run > header div {
+  display: grid;
+  gap: 3px;
+}
+
+.workflow-run small,
+.workflow-item small {
+  color: var(--muted);
+}
+
+.workflow-state,
+.workflow-assignment {
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  font-size: 11px;
+  padding: 3px 7px;
+}
+
+.workflow-state.completed,
+.workflow-state.passed,
+.workflow-assignment.completed {
+  color: var(--success);
+}
+
+.workflow-state.failed,
+.workflow-state.needs_human,
+.workflow-assignment.failed {
+  color: var(--danger);
+}
+
+.workflow-progress {
+  background: var(--page);
+  border-radius: 999px;
+  height: 7px;
+  overflow: hidden;
+}
+
+.workflow-progress span {
+  background: var(--primary);
+  display: block;
+  height: 100%;
+}
+
+.workflow-items {
+  display: grid;
+  gap: 7px;
+}
+
+.workflow-finding {
+  border-left: 2px solid var(--danger);
+  color: var(--danger);
+  font-size: 12px;
+  padding-left: 7px;
+}
+
+.workflow-artifact {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.workflow-empty {
+  color: var(--muted);
+  padding: 20px;
+  text-align: center;
+}
+
+.dialog-form textarea {
+  background: var(--page);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  padding: 8px;
+  resize: vertical;
+  width: 100%;
+}
+
 .room-messages {
   align-content: start;
   display: grid;

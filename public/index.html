@@ -32,8 +32,22 @@
               <h2 id="room-title">Room</h2>
               <p id="room-subtitle"></p>
             </div>
+            <div class="workflow-tabs">
+              <button id="workflow-tab-messages" class="ghost active" type="button">消息</button>
+              <button id="workflow-tab-board" class="ghost" type="button">工作流</button>
+            </div>
           </div>
           <div id="room-messages" class="room-messages"></div>
+          <section id="workflow-board" class="workflow-board" hidden>
+            <header class="workflow-board-head">
+              <strong>项目工作流</strong>
+              <div>
+                <button id="workflow-refresh" class="ghost" type="button">刷新</button>
+                <button id="workflow-create" type="button">新建工作流</button>
+              </div>
+            </header>
+            <div id="workflow-content" class="workflow-content"></div>
+          </section>
         </section>
         <pre id="output"></pre>
         <div class="quick-key-row">
@@ -171,6 +185,52 @@
           <input id="room-project" placeholder="项目名" />
           <input id="room-objective" placeholder="目标" />
           <button id="create-room-submit" type="submit" data-i18n="create">新建</button>
+        </form>
+      </dialog>
+
+      <dialog id="workflow-dialog">
+        <form id="workflow-form" class="dialog-form">
+          <div class="dialog-head">
+            <h2>新建项目工作流</h2>
+            <button class="ghost" data-close-dialog="workflow-dialog" type="button">关闭</button>
+          </div>
+          <label>
+            <span>项目目标</span>
+            <textarea id="workflow-objective" rows="5" placeholder="描述需要规划、开发、测试和安全审计的项目目标"></textarea>
+          </label>
+          <label>
+            <span>工作流模板</span>
+            <select id="workflow-template"></select>
+          </label>
+          <button id="workflow-manage-templates" class="ghost" type="button">管理自定义模板</button>
+          <label class="inline-check">
+            <input id="workflow-auto-start" type="checkbox" checked />
+            <span>创建后立即交给 Planner</span>
+          </label>
+          <button type="submit">创建工作流</button>
+        </form>
+      </dialog>
+
+      <dialog id="workflow-template-dialog">
+        <form id="workflow-template-form" class="dialog-form">
+          <div class="dialog-head">
+            <h2>自定义工作流模板</h2>
+            <button class="ghost" data-close-dialog="workflow-template-dialog" type="button">关闭</button>
+          </div>
+          <label><span>已有模板</span><select id="workflow-template-list"></select></label>
+          <input id="workflow-template-id" type="hidden" />
+          <label><span>名称</span><input id="workflow-template-name" required /></label>
+          <label><span>说明</span><input id="workflow-template-description" /></label>
+          <label>
+            <span>阶段定义（JSON）</span>
+            <textarea id="workflow-template-stages" rows="16" spellcheck="false"></textarea>
+          </label>
+          <small>每阶段字段：id、name、role、mode（one/all）、prompt、maxAttempts。提示词支持 {objective}、{sessionName}、{role}、{previousResults}。</small>
+          <div class="dialog-actions">
+            <button id="workflow-template-new" class="ghost" type="button">新建</button>
+            <button id="workflow-template-delete" class="danger" type="button">删除</button>
+            <button type="submit">保存模板</button>
+          </div>
         </form>
       </dialog>
 

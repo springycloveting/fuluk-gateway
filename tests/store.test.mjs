@@ -251,3 +251,44 @@ test("SessionStore stores room messages with per-session delivery state", () => 
   assert.equal(messages[0].deliveries[0].status, "sent");
   store.close();
 });
+
+test("SessionStore creates, lists, and starts a room workflow", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-"));
+  const store = new SessionStore(path.join(dir, "test.sqlite"));
+  const planner = store.create({ kind: "runtime", cwd: dir, name: "planner" }, "/bin/bash", []);
+  const room = store.createRoom({ name: "workflow-room" });
+  store.assignSessionToRoom(room.id, planner.id, "planner");
+
+  const created = store.createWorkflowRun({ roomId: room.id, objective: "Ship workflow UI" });
+  assert.equal(created.status, "draft");
+  assert.equal(store.listWorkflowRuns(room.id).length, 1);
+
+  const started = store.startWorkflowRun(created.id, { eventKey: "test:start" });
+  assert.equal(started.status, "planning");
+  assert.equal(started.runAssignments[0].role, "planner");
+  assert.equal(started.runAssignments[0].gateKind, "planning");
+  store.close();
+});
+
+test("SessionStore persists custom workflow templates and snapshots them into runs", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-"));
+  const store = new SessionStore(path.join(dir, "test.sqlite"));
+  const room = store.createRoom({ name: "custom-workflow-room" });
+  const template = store.createWorkflowTemplate({
+    name: "Review and publish",
+    description: "Custom flow",
+    stages: [
+      { id: "review", role: "reviewer", mode: "all", prompt: "Review {objective}", maxAttempts: 2 },
+      { id: "publish", role: "publisher", mode: "one", prompt: "Publish {previousResults}", maxAttempts: 1 }
+    ]
+  });
+  const run = store.createWorkflowRun({ roomId: room.id, objective: "Ship release", templateId: template.id });
+  assert.equal(run.templateName, "Review and publish");
+  assert.equal(run.currentStage, "review");
+  assert.equal(run.templateDefinition.stages[1].role, "publisher");
+  store.updateWorkflowTemplate(template.id, { ...template, name: "Changed", stages: template.stages });
+  assert.equal(store.getWorkflowRun(run.id).templateName, "Review and publish");
+  assert.equal(store.listWorkflowTemplates().length, 2);
+  assert.equal(store.deleteWorkflowTemplate(template.id), true);
+  store.close();
+});

@@ -1,7 +1,15 @@
+import { canAutoYesSession, shouldSendAutoYes } from "./auto_yes.js";
+import { isNearScrollBottom, roomMessagesSignature } from "./room_messages.js";
+import { currentWorkflowAssignments } from "./workflow_view.js";
+
 const state = {
   sessions: [],
   rooms: [],
   roomMessages: [],
+  workflows: [],
+  workflowTemplates: [],
+  workflowView: false,
+  workflowPollTimer: null,
   rolePresets: [],
   selectedRoomId: localStorage.getItem("sessionGatewaySelectedRoomId") || "",
   selectedRoomChatId: "",
@@ -274,6 +282,27 @@ const els = {
   roomTitle: document.querySelector("#room-title"),
   roomSubtitle: document.querySelector("#room-subtitle"),
   roomMessages: document.querySelector("#room-messages"),
+  workflowTabMessages: document.querySelector("#workflow-tab-messages"),
+  workflowTabBoard: document.querySelector("#workflow-tab-board"),
+  workflowBoard: document.querySelector("#workflow-board"),
+  workflowContent: document.querySelector("#workflow-content"),
+  workflowRefresh: document.querySelector("#workflow-refresh"),
+  workflowCreate: document.querySelector("#workflow-create"),
+  workflowDialog: document.querySelector("#workflow-dialog"),
+  workflowForm: document.querySelector("#workflow-form"),
+  workflowObjective: document.querySelector("#workflow-objective"),
+  workflowTemplate: document.querySelector("#workflow-template"),
+  workflowManageTemplates: document.querySelector("#workflow-manage-templates"),
+  workflowAutoStart: document.querySelector("#workflow-auto-start"),
+  workflowTemplateDialog: document.querySelector("#workflow-template-dialog"),
+  workflowTemplateForm: document.querySelector("#workflow-template-form"),
+  workflowTemplateList: document.querySelector("#workflow-template-list"),
+  workflowTemplateId: document.querySelector("#workflow-template-id"),
+  workflowTemplateName: document.querySelector("#workflow-template-name"),
+  workflowTemplateDescription: document.querySelector("#workflow-template-description"),
+  workflowTemplateStages: document.querySelector("#workflow-template-stages"),
+  workflowTemplateNew: document.querySelector("#workflow-template-new"),
+  workflowTemplateDelete: document.querySelector("#workflow-template-delete"),
   roomActions: document.querySelector("#room-actions"),
   openRoomAssistant: document.querySelector("#open-room-assistant"),
   refreshRoomMessages: document.querySelector("#refresh-room-messages"),
@@ -387,6 +416,49 @@ els.roomFilter.addEventListener("change", () => {
   renderQuickKeys();
 });
 els.refreshRoomMessages.addEventListener("click", loadRoomMessages);
+els.workflowTabMessages.addEventListener("click", () => showWorkflowView(false));
+els.workflowTabBoard.addEventListener("click", async () => {
+  showWorkflowView(true);
+  await loadWorkflows();
+});
+els.workflowRefresh.addEventListener("click", loadWorkflows);
+els.workflowContent.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-workflow-action]");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    await api(`/api/workflows/${encodeURIComponent(button.dataset.workflowId)}/${button.dataset.workflowAction}`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    await loadWorkflows();
+  } catch (error) {
+    showError(error);
+  } finally {
+    button.disabled = false;
+  }
+});
+els.workflowCreate.addEventListener("click", () => {
+  els.workflowObjective.value = selectedRoomForChat()?.objective || "";
+  loadWorkflowTemplates();
+  els.workflowDialog.showModal();
+});
+els.workflowForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await createWorkflow();
+});
+els.workflowManageTemplates.addEventListener("click", async () => {
+  await loadWorkflowTemplates();
+  selectWorkflowTemplateEditor(els.workflowTemplate.value);
+  els.workflowTemplateDialog.showModal();
+});
+els.workflowTemplateList.addEventListener("change", () => selectWorkflowTemplateEditor(els.workflowTemplateList.value));
+els.workflowTemplateNew.addEventListener("click", () => selectWorkflowTemplateEditor(""));
+els.workflowTemplateDelete.addEventListener("click", deleteWorkflowTemplate);
+els.workflowTemplateForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await saveWorkflowTemplate();
+});
 els.openRoomAssistant.addEventListener("click", () => {
   openRoomAssistantDialog();
   els.nl.focus();
@@ -485,7 +557,7 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     clearOutputPoll();
-    clearSessionPoll();
+    if (state.allYesMode !== "global") clearSessionPoll();
   } else {
     resetOutputPolling(1000);
     scheduleSessionPoll(1000);
@@ -638,6 +710,174 @@ async function loadRoomMessages() {
   }
 }
 
+function showWorkflowView(enabled) {
+  state.workflowView = enabled;
+  els.roomMessages.hidden = enabled;
+  els.workflowBoard.hidden = !enabled;
+  els.workflowTabMessages.classList.toggle("active", !enabled);
+  els.workflowTabBoard.classList.toggle("active", enabled);
+  els.roomActions.hidden = enabled;
+  els.input.closest(".input-row").hidden = enabled;
+  if (!enabled) clearWorkflowPoll();
+}
+
+async function loadWorkflows() {
+  const roomId = state.selectedRoomChatId;
+  if (!roomId) return;
+  try {
+    const data = await api(`/api/rooms/${encodeURIComponent(roomId)}/workflows`);
+    if (roomId !== state.selectedRoomChatId) return;
+    state.workflows = data.workflows ?? [];
+    renderWorkflows();
+    scheduleWorkflowPoll();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function createWorkflow() {
+  const roomId = state.selectedRoomChatId;
+  const objective = els.workflowObjective.value.trim();
+  if (!roomId || !objective) return showError(new Error("项目目标不能为空"));
+  try {
+    const created = await api(`/api/rooms/${encodeURIComponent(roomId)}/workflows`, {
+      method: "POST",
+      body: JSON.stringify({ objective, templateId: els.workflowTemplate.value || undefined })
+    });
+    if (els.workflowAutoStart.checked) {
+      await api(`/api/workflows/${encodeURIComponent(created.workflow.id)}/start`, {
+        method: "POST",
+        body: JSON.stringify({ eventKey: `ui-start:${created.workflow.id}` })
+      });
+    }
+    els.workflowDialog.close();
+    await loadWorkflows();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+const WORKFLOW_STAGE_EXAMPLE = [
+  { id: "plan", name: "规划", role: "planner", mode: "one", maxAttempts: 3, prompt: "请规划以下目标并回传可执行方案：\n{objective}" },
+  { id: "build", name: "开发", role: "coder", mode: "all", maxAttempts: 3, prompt: "你是 {sessionName}。根据目标和前序结果完成分配给你的开发：\n目标：{objective}\n前序结果：{previousResults}" },
+  { id: "verify", name: "测试", role: "testerall", mode: "one", maxAttempts: 3, prompt: "请执行完整测试。\n目标：{objective}\n前序结果：{previousResults}" }
+];
+
+async function loadWorkflowTemplates() {
+  const data = await api("/api/workflow-templates");
+  state.workflowTemplates = data.templates ?? [];
+  const selected = els.workflowTemplate.value || "builtin-project-delivery";
+  const options = state.workflowTemplates.map((template) =>
+    `<option value="${escapeHtml(template.id)}">${escapeHtml(template.name)}</option>`
+  ).join("");
+  els.workflowTemplate.innerHTML = options;
+  els.workflowTemplateList.innerHTML = `<option value="">新建模板</option>${options}`;
+  if (state.workflowTemplates.some((item) => item.id === selected)) els.workflowTemplate.value = selected;
+}
+
+function selectWorkflowTemplateEditor(id) {
+  const template = state.workflowTemplates.find((item) => item.id === id);
+  const builtin = template?.kind === "classic";
+  els.workflowTemplateList.value = id || "";
+  els.workflowTemplateId.value = builtin ? "" : template?.id || "";
+  els.workflowTemplateName.value = builtin ? "" : template?.name || "";
+  els.workflowTemplateDescription.value = builtin ? "" : template?.description || "";
+  els.workflowTemplateStages.value = JSON.stringify(builtin ? WORKFLOW_STAGE_EXAMPLE : template?.stages || WORKFLOW_STAGE_EXAMPLE, null, 2);
+  els.workflowTemplateDelete.disabled = !template || builtin;
+}
+
+async function saveWorkflowTemplate() {
+  try {
+    const stages = JSON.parse(els.workflowTemplateStages.value);
+    const id = els.workflowTemplateId.value;
+    const result = await api(id ? `/api/workflow-templates/${encodeURIComponent(id)}` : "/api/workflow-templates", {
+      method: id ? "PUT" : "POST",
+      body: JSON.stringify({
+        name: els.workflowTemplateName.value,
+        description: els.workflowTemplateDescription.value,
+        stages
+      })
+    });
+    await loadWorkflowTemplates();
+    els.workflowTemplate.value = result.template.id;
+    selectWorkflowTemplateEditor(result.template.id);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function deleteWorkflowTemplate() {
+  const id = els.workflowTemplateId.value;
+  if (!id) return;
+  try {
+    await api(`/api/workflow-templates/${encodeURIComponent(id)}`, { method: "DELETE" });
+    await loadWorkflowTemplates();
+    selectWorkflowTemplateEditor("");
+  } catch (error) {
+    showError(error);
+  }
+}
+
+function renderWorkflows() {
+  if (!state.workflows.length) {
+    els.workflowContent.innerHTML = `<div class="workflow-empty">这个房间还没有工作流。</div>`;
+    return;
+  }
+  els.workflowContent.innerHTML = state.workflows.map((workflow) => `
+    <article class="workflow-run">
+      <header>
+        <div><strong>${escapeHtml(workflow.objective)}</strong><small>${escapeHtml(workflow.templateName || "标准项目交付")} · ${escapeHtml(workflowStageName(workflow.currentStage))}</small></div>
+        <span class="workflow-state ${escapeHtml(workflow.status)}">${escapeHtml(workflowStateName(workflow.status))}</span>
+      </header>
+      <div class="workflow-progress"><span style="width:${workflowProgress(workflow)}%"></span></div>
+      <div class="workflow-gates">${currentWorkflowAssignments(workflow.runAssignments).map(renderWorkflowAssignment).join("")}</div>
+      <div class="workflow-items">${(workflow.workItems ?? []).map(renderWorkflowItem).join("") || "<span>等待 Planner 拆解任务</span>"}</div>
+      ${(workflow.artifacts ?? []).map((artifact) => `<code class="workflow-artifact">${escapeHtml(artifact.location)}</code>`).join("")}
+      ${!["completed", "cancelled"].includes(workflow.status) ? `<button class="ghost workflow-advance" type="button" data-workflow-action="${workflow.status === "draft" ? "start" : "advance"}" data-workflow-id="${escapeHtml(workflow.id)}">${workflow.status === "draft" ? "启动" : "继续流转"}</button>` : ""}
+    </article>
+  `).join("");
+}
+
+function renderWorkflowItem(item) {
+  return `<section class="workflow-item">
+    <header><strong>${escapeHtml(item.title)}</strong><span class="workflow-state ${escapeHtml(item.status)}">${escapeHtml(workflowStateName(item.status))}</span></header>
+    <small>${escapeHtml((item.acceptanceCriteria ?? []).join(" · "))}</small>
+    <div class="workflow-gates">${(item.assignments ?? []).map(renderWorkflowAssignment).join("")}</div>
+    ${(item.findings ?? []).map((finding) => `<div class="workflow-finding">[${escapeHtml(finding.severity)}] ${escapeHtml(finding.title)}：${escapeHtml(finding.evidence || "")}</div>`).join("")}
+  </section>`;
+}
+
+function renderWorkflowAssignment(assignment) {
+  return `<span class="workflow-assignment ${escapeHtml(assignment.status)}">${escapeHtml(assignment.role)} #${escapeHtml(assignment.attemptNo)} · ${escapeHtml(workflowStateName(assignment.status))}</span>`;
+}
+
+function workflowProgress(workflow) {
+  if (workflow.status === "completed") return 100;
+  const base = { draft: 0, planning: 10, executing: 35, integration_testing: 70, security_review: 85, needs_human: 85 }[workflow.status] ?? 0;
+  const items = workflow.workItems ?? [];
+  const passed = items.filter((item) => item.status === "passed").length;
+  return Math.round(Math.max(base, items.length ? 20 + (passed / items.length) * 50 : base));
+}
+
+function workflowStateName(value) {
+  return ({ draft: "草稿", planning: "规划中", planned: "等待依赖", executing: "执行中", coding: "开发中", task_testing: "任务测试", integration_testing: "整体测试", security_review: "安全审计", security_fix: "安全修复", pending: "待执行", passed: "已通过", completed: "已完成", failed: "失败", needs_human: "需人工介入" })[value] || value;
+}
+
+function workflowStageName(value) {
+  return ({ planning: "规划", development: "开发", testing: "分项测试", coding: "开发", integration_testing: "整体测试", security_review: "安全审计", security_fix: "安全修复", needs_human: "人工介入", human_intervention: "人工介入", completed: "完成" })[value] || value;
+}
+
+function scheduleWorkflowPoll() {
+  clearWorkflowPoll();
+  if (!state.workflowView || !state.workflows.some((workflow) => !["completed", "cancelled", "needs_human"].includes(workflow.status))) return;
+  state.workflowPollTimer = setTimeout(loadWorkflows, 5_000);
+}
+
+function clearWorkflowPoll() {
+  if (state.workflowPollTimer) clearTimeout(state.workflowPollTimer);
+  state.workflowPollTimer = null;
+}
+
 async function createRoom() {
   try {
     const body = {
@@ -744,12 +984,18 @@ function renderRoomPanel() {
   if (!room) return;
   els.roomTitle.textContent = room.name;
   els.roomSubtitle.textContent = [room.objective, room.project].filter(Boolean).join(" · ");
+  const signature = `${state.language}:${roomMessagesSignature(state.roomMessages)}`;
+  if (els.roomMessages.dataset.signature === signature) return;
+  const followLatest = !els.roomMessages.dataset.signature || isNearScrollBottom(els.roomMessages);
+  const previousScrollTop = els.roomMessages.scrollTop;
   if (!state.roomMessages.length) {
     els.roomMessages.innerHTML = `<div class="room-empty">${escapeHtml(t("roomEmpty"))}</div>`;
+    els.roomMessages.dataset.signature = signature;
     return;
   }
   els.roomMessages.innerHTML = state.roomMessages.map(renderRoomMessage).join("");
-  els.roomMessages.scrollTop = els.roomMessages.scrollHeight;
+  els.roomMessages.dataset.signature = signature;
+  els.roomMessages.scrollTop = followLatest ? els.roomMessages.scrollHeight : previousScrollTop;
 }
 
 function renderRoomMessage(message) {
@@ -1073,7 +1319,7 @@ function maybeAutoYes(text, options = {}) {
     if (!match) return;
     const sessionId = selected.id;
     const signature = match.signature;
-    if (!options.force && state.autoYesSignatures.get(sessionId) === signature) return;
+    if (!options.force && !shouldSendAutoYes(state.autoYesSignatures.get(sessionId), signature)) return;
     sendAutoYes(sessionId, signature, match.key, match.type);
   }
 }
@@ -1089,8 +1335,8 @@ async function autoYesAllSessions() {
       const match = findYesOption(output);
       if (match) {
         const signature = match.signature;
-        if (state.autoYesSignatures.get(session.id) !== signature) {
-          await sendAutoYes(session.id, signature, match.key, match.type);
+        if (shouldSendAutoYes(state.autoYesSignatures.get(session.id), signature)) {
+          await sendAutoYes(session.id, signature, match.key, match.type, { allowBackground: true });
         }
       }
     } catch (error) {
@@ -1240,8 +1486,8 @@ async function sendQuickText(text) {
   }
 }
 
-async function sendAutoYes(sessionId, signature, key = "1", type = "text") {
-  if (!state.selected || state.selected.id !== sessionId || state.selected.status !== "running") return;
+async function sendAutoYes(sessionId, signature, key = "1", type = "text", options = {}) {
+  if (!canAutoYesSession(state.sessions, state.selected?.id, sessionId, options)) return;
   try {
     if (type === "key") {
       await api(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, {
@@ -1254,9 +1500,9 @@ async function sendAutoYes(sessionId, signature, key = "1", type = "text") {
         body: JSON.stringify({ text: key })
       });
     }
-    state.autoYesSignatures.set(sessionId, signature);
+    state.autoYesSignatures.set(sessionId, { signature, sentAt: Date.now() });
     clearOutputEtag(sessionId);
-    resetOutputPolling(500);
+    if (state.selected?.id === sessionId) resetOutputPolling(500);
   } catch (error) {
     showError(error);
   }
@@ -1627,10 +1873,14 @@ async function selectSession(session) {
 }
 
 async function selectRoomChat(room) {
+  clearWorkflowPoll();
   state.selectedRoomChatId = room.id;
   state.selected = null;
   state.selectedSessionId = "";
   state.selectionVersion += 1;
+  state.workflowView = false;
+  state.workflows = [];
+  delete els.roomMessages.dataset.signature;
   clearOutputPoll();
   renderSessions();
   renderTaskAlert();
@@ -1638,12 +1888,15 @@ async function selectRoomChat(room) {
   renderRoomPanel();
   closeSessionsPanel();
   await loadRoomMessages();
+  showWorkflowView(false);
   els.title.textContent = `${t("projectGroupChat")} · ${room.name}`;
   els.input.focus();
 }
 
 function showTerminalView() {
+  clearWorkflowPoll();
   state.selectedRoomChatId = "";
+  delete els.roomMessages.dataset.signature;
   els.output.hidden = false;
   els.roomPanel.hidden = true;
   els.roomActions.hidden = true;
@@ -1980,7 +2233,7 @@ function scheduleOutputPoll(delayMs) {
 
 function scheduleSessionPoll(delayMs = 5000) {
   clearSessionPoll();
-  if (document.hidden) return;
+  if (document.hidden && state.allYesMode !== "global") return;
   state.sessionPollTimer = setTimeout(refreshSessions, delayMs);
 }
 

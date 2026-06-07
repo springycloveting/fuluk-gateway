@@ -3,6 +3,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { ECC_ROLE_PRESETS } from "./role_presets.mjs";
 import { newId, nowIso, sanitizeTmuxName } from "./utils.mjs";
+import { DEFAULT_WORKFLOW_TEMPLATE, normalizeWorkflowTemplate } from "./workflow_templates.mjs";
 
 export class SessionStore {
   constructor(databasePath) {
@@ -452,6 +453,193 @@ export class SessionStore {
     return { ...room, sessions: this.listRoomSessions(room.id) };
   }
 
+  createWorkflowRun(input = {}) {
+    const room = this.getRoom(input.roomId);
+    if (!room) throw new Error(`Room not found: ${input.roomId}`);
+    if (typeof input.objective !== "string" || !input.objective.trim()) throw new Error("workflow objective is required");
+    const template = input.templateId ? this.getWorkflowTemplate(input.templateId) : DEFAULT_WORKFLOW_TEMPLATE;
+    if (!template) throw new Error(`Workflow template not found: ${input.templateId}`);
+    const definition = template.definition ?? template;
+    const timestamp = nowIso();
+    const run = {
+      id: newId(),
+      roomId: room.id,
+      objective: input.objective.trim(),
+      status: "draft",
+      currentStage: definition.kind === "classic" ? "planning" : definition.stages[0].id,
+      templateId: template.id,
+      templateName: template.name,
+      templateDefinition: definition,
+      version: 1,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      startedAt: null,
+      completedAt: null
+    };
+    this.db.prepare(
+      `insert into workflow_runs (
+        id, room_id, objective, status, current_stage, version, template_id, template_name, template_json,
+        created_at, updated_at, started_at, completed_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      run.id, run.roomId, run.objective, run.status, run.currentStage, run.version,
+      run.templateId, run.templateName, JSON.stringify(run.templateDefinition),
+      run.createdAt, run.updatedAt, run.startedAt, run.completedAt
+    );
+    return this.getWorkflowRun(run.id);
+  }
+
+  listWorkflowRuns(roomId) {
+    const room = this.getRoom(roomId);
+    if (!room) throw new Error(`Room not found: ${roomId}`);
+    return this.db.prepare("select * from workflow_runs where room_id = ? order by created_at desc")
+      .all(room.id)
+      .map((row) => this.withWorkflowDetails(mapWorkflowRunRow(row)));
+  }
+
+  getWorkflowRun(runId) {
+    const row = this.db.prepare("select * from workflow_runs where id = ?").get(runId);
+    return row ? this.withWorkflowDetails(mapWorkflowRunRow(row)) : null;
+  }
+
+  startWorkflowRun(runId, input = {}) {
+    const run = this.getWorkflowRun(runId);
+    if (!run) throw new Error(`Workflow run not found: ${runId}`);
+    if (run.status !== "draft") return run;
+    const definition = run.templateDefinition ?? DEFAULT_WORKFLOW_TEMPLATE;
+    const firstStage = definition.kind === "classic" ? { id: "planning", role: "planner", mode: "one" } : definition.stages[0];
+    const members = this.listRoomSessions(run.roomId).filter((session) =>
+      [session.role, session.rolePresetName, session.rolePresetLabel]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase() === firstStage.role.toLowerCase())
+    );
+    const targets = firstStage.mode === "all" ? members : members.slice(0, 1);
+    if (!targets.length) throw new Error(`Workflow requires at least one ${firstStage.role} session`);
+    const timestamp = nowIso();
+    this.db.exec("begin immediate");
+    try {
+      const statement = this.db.prepare(
+        `insert into workflow_assignments (
+          id, run_id, work_item_id, gate_kind, role, session_id, attempt_no,
+          status, dispatched_message_id, created_at, updated_at, finished_at
+        ) values (?, ?, null, ?, ?, ?, 1, 'pending', null, ?, ?, null)`
+      );
+      for (const target of targets) statement.run(newId(), run.id, firstStage.id, firstStage.role, target.sessionId, timestamp, timestamp);
+      this.db.prepare(
+        "update workflow_runs set status = ?, version = version + 1, updated_at = ?, started_at = ? where id = ?"
+      ).run(definition.kind === "classic" ? "planning" : "executing", timestamp, timestamp, run.id);
+      this.db.prepare(
+        "insert into workflow_events (id, run_id, event_key, event_type, created_at) values (?, ?, ?, 'workflow_started', ?)"
+      ).run(newId(), run.id, input.eventKey || `start:${run.id}`, timestamp);
+      this.db.exec("commit");
+    } catch (error) {
+      this.db.exec("rollback");
+      throw error;
+    }
+    return this.getWorkflowRun(run.id);
+  }
+
+  markWorkflowAssignmentDispatched(assignmentId, messageId) {
+    this.db.prepare(
+      "update workflow_assignments set dispatched_message_id = ?, updated_at = ? where id = ?"
+    ).run(messageId, nowIso(), assignmentId);
+    const row = this.db.prepare("select * from workflow_assignments where id = ?").get(assignmentId);
+    return row ? mapWorkflowAssignmentRow(row) : null;
+  }
+
+  getWorkflowAssignment(assignmentId) {
+    const row = this.db.prepare("select * from workflow_assignments where id = ?").get(assignmentId);
+    return row ? mapWorkflowAssignmentRow(row) : null;
+  }
+
+  createWorkflowAssignment(input = {}) {
+    const timestamp = nowIso();
+    const assignment = {
+      id: newId(),
+      runId: input.runId,
+      workItemId: input.workItemId ?? null,
+      gateKind: input.gateKind,
+      role: input.role,
+      sessionId: input.sessionId,
+      attemptNo: Number(input.attemptNo) || 1,
+      status: "pending",
+      createdAt: timestamp,
+      updatedAt: timestamp
+    };
+    this.db.prepare(
+      `insert into workflow_assignments (
+        id, run_id, work_item_id, gate_kind, role, session_id, attempt_no,
+        status, dispatched_message_id, result_message_id, created_at, updated_at, finished_at
+      ) values (?, ?, ?, ?, ?, ?, ?, 'pending', null, null, ?, ?, null)`
+    ).run(
+      assignment.id, assignment.runId, assignment.workItemId, assignment.gateKind,
+      assignment.role, assignment.sessionId, assignment.attemptNo, timestamp, timestamp
+    );
+    return this.getWorkflowAssignment(assignment.id);
+  }
+
+  finishWorkflowAssignment(assignmentId, status, resultMessageId) {
+    const result = this.db.prepare(
+      `update workflow_assignments
+       set status = ?, result_message_id = ?, updated_at = ?, finished_at = ?
+       where id = ? and result_message_id is null`
+    ).run(status, resultMessageId, nowIso(), nowIso(), assignmentId);
+    return { changed: Number(result.changes) > 0, assignment: this.getWorkflowAssignment(assignmentId) };
+  }
+
+  updateWorkflowRunState(runId, status, currentStage, options = {}) {
+    const timestamp = nowIso();
+    this.db.prepare(
+      `update workflow_runs
+       set status = ?, current_stage = ?, version = version + 1, updated_at = ?, completed_at = ?
+       where id = ?`
+    ).run(status, currentStage, timestamp, options.completed ? timestamp : null, runId);
+    return this.getWorkflowRun(runId);
+  }
+
+  listWorkflowTemplates() {
+    const custom = this.db.prepare("select * from workflow_templates order by updated_at desc").all().map(mapWorkflowTemplateRow);
+    return [DEFAULT_WORKFLOW_TEMPLATE, ...custom];
+  }
+
+  getWorkflowTemplate(id) {
+    if (!id || id === DEFAULT_WORKFLOW_TEMPLATE.id) return DEFAULT_WORKFLOW_TEMPLATE;
+    const row = this.db.prepare("select * from workflow_templates where id = ?").get(id);
+    return row ? mapWorkflowTemplateRow(row) : null;
+  }
+
+  createWorkflowTemplate(input = {}) {
+    const definition = normalizeWorkflowTemplate(input);
+    const timestamp = nowIso();
+    const id = newId();
+    this.db.prepare(
+      "insert into workflow_templates (id, name, description, definition_json, created_at, updated_at) values (?, ?, ?, ?, ?, ?)"
+    ).run(id, definition.name, definition.description, JSON.stringify(definition), timestamp, timestamp);
+    return this.getWorkflowTemplate(id);
+  }
+
+  updateWorkflowTemplate(id, input = {}) {
+    if (id === DEFAULT_WORKFLOW_TEMPLATE.id) throw new Error("Built-in workflow template cannot be edited");
+    const definition = normalizeWorkflowTemplate(input);
+    const result = this.db.prepare(
+      "update workflow_templates set name = ?, description = ?, definition_json = ?, updated_at = ? where id = ?"
+    ).run(definition.name, definition.description, JSON.stringify(definition), nowIso(), id);
+    if (!Number(result.changes)) throw new Error(`Workflow template not found: ${id}`);
+    return this.getWorkflowTemplate(id);
+  }
+
+  deleteWorkflowTemplate(id) {
+    if (id === DEFAULT_WORKFLOW_TEMPLATE.id) throw new Error("Built-in workflow template cannot be deleted");
+    return Number(this.db.prepare("delete from workflow_templates where id = ?").run(id).changes) > 0;
+  }
+
+  withWorkflowDetails(run) {
+    const runAssignments = this.db.prepare("select * from workflow_assignments where run_id = ? order by created_at")
+      .all(run.id)
+      .map(mapWorkflowAssignmentRow);
+    return { ...run, workItems: [], runAssignments, artifacts: [] };
+  }
+
   migrate() {
     this.db.exec(`
       create table if not exists sessions (
@@ -541,6 +729,55 @@ export class SessionStore {
         updated_at text not null
       );
 
+      create table if not exists workflow_runs (
+        id text primary key,
+        room_id text not null references rooms(id) on delete cascade,
+        objective text not null,
+        status text not null,
+        current_stage text not null,
+        version integer not null,
+        template_id text,
+        template_name text,
+        template_json text,
+        created_at text not null,
+        updated_at text not null,
+        started_at text,
+        completed_at text
+      );
+
+      create table if not exists workflow_templates (
+        id text primary key,
+        name text not null,
+        description text,
+        definition_json text not null,
+        created_at text not null,
+        updated_at text not null
+      );
+
+      create table if not exists workflow_assignments (
+        id text primary key,
+        run_id text not null references workflow_runs(id) on delete cascade,
+        work_item_id text,
+        gate_kind text not null,
+        role text not null,
+        session_id text not null references sessions(id),
+        attempt_no integer not null,
+        status text not null,
+        dispatched_message_id text,
+        created_at text not null,
+        updated_at text not null,
+        finished_at text
+      );
+
+      create table if not exists workflow_events (
+        id text primary key,
+        run_id text not null references workflow_runs(id) on delete cascade,
+        event_key text not null,
+        event_type text not null,
+        created_at text not null,
+        unique (run_id, event_key)
+      );
+
       create index if not exists idx_output_snapshots_session_id_id
         on output_snapshots(session_id, id desc);
 
@@ -561,6 +798,11 @@ export class SessionStore {
     `);
     this.ensureColumn("room_sessions", "role_preset_id", "text references role_presets(id) on delete set null");
     this.ensureColumn("room_sessions", "role_prompt", "text");
+    this.ensureColumn("workflow_assignments", "dispatched_message_id", "text");
+    this.ensureColumn("workflow_assignments", "result_message_id", "text");
+    this.ensureColumn("workflow_runs", "template_id", "text");
+    this.ensureColumn("workflow_runs", "template_name", "text");
+    this.ensureColumn("workflow_runs", "template_json", "text");
     this.seedRolePresets();
   }
 
@@ -738,6 +980,56 @@ function mapRolePresetRow(row) {
     sourceUrl: row.source_url,
     createdAt: row.created_at,
     updatedAt: row.updated_at
+  };
+}
+
+function mapWorkflowRunRow(row) {
+  return {
+    id: row.id,
+    roomId: row.room_id,
+    objective: row.objective,
+    status: row.status,
+    currentStage: row.current_stage,
+    version: Number(row.version),
+    templateId: row.template_id || DEFAULT_WORKFLOW_TEMPLATE.id,
+    templateName: row.template_name || DEFAULT_WORKFLOW_TEMPLATE.name,
+    templateDefinition: row.template_json ? JSON.parse(row.template_json) : DEFAULT_WORKFLOW_TEMPLATE,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    startedAt: row.started_at,
+    completedAt: row.completed_at
+  };
+}
+
+function mapWorkflowTemplateRow(row) {
+  const definition = JSON.parse(row.definition_json);
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description || "",
+    kind: definition.kind,
+    stages: definition.stages,
+    definition,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapWorkflowAssignmentRow(row) {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    workItemId: row.work_item_id,
+    role: row.role,
+    sessionId: row.session_id,
+    gateKind: row.gate_kind,
+    attemptNo: Number(row.attempt_no),
+    status: row.status,
+    dispatchedMessageId: row.dispatched_message_id,
+    resultMessageId: row.result_message_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    finishedAt: row.finished_at
   };
 }
 

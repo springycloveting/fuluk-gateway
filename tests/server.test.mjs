@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 import { handleSessionGatewayRequest } from "../src/server.mjs";
+import { SessionStore } from "../src/store.mjs";
 
 test("/api/nl output uses currentSessionId and returns JSON output", async () => {
   const session = {
@@ -1260,6 +1264,209 @@ test("/api/rooms/:id/messages sends a room message to matching running role sess
   assert.match(sendCall.text, /\[DONE\].*\[FAIL\].*\[BLOCKED\].*\[BUG\]/s);
   assert.match(sendCall.text, /Please review the plan/);
   assert.deepEqual(calls.map((call) => call.type), ["send", "saveInput", "touch"]);
+});
+
+test("/api/workflows/:id/start dispatches a pending planner assignment", async () => {
+  const calls = [];
+  const deliveries = [];
+  const assignment = {
+    id: "assignment-1",
+    runId: "workflow-1",
+    role: "planner",
+    sessionId: "planner-1",
+    gateKind: "planning",
+    attemptNo: 1,
+    status: "pending",
+    dispatchedMessageId: null
+  };
+  const workflow = {
+    id: "workflow-1",
+    roomId: "room-1",
+    objective: "Implement account search",
+    status: "planning",
+    currentStage: "planning",
+    runAssignments: [assignment]
+  };
+  const room = {
+    id: "room-1",
+    name: "launch",
+    sessions: [
+      { roomId: "room-1", sessionId: "planner-1", sessionName: "planer", sessionStatus: "running", role: "planner" }
+    ]
+  };
+  const planner = { id: "planner-1", name: "planer", kind: "codex", status: "running", cwd: "/workspace" };
+  const context = createCreateSessionContext({ records: [] });
+  context.store = {
+    startWorkflowRun(id) {
+      assert.equal(id, workflow.id);
+      return workflow;
+    },
+    getWorkflowRun(id) {
+      assert.equal(id, workflow.id);
+      return workflow;
+    },
+    getRoom(id) {
+      return id === room.id ? room : null;
+    },
+    createRoomMessage(input) {
+      return {
+        id: "message-1",
+        roomId: input.roomId,
+        fromSessionId: null,
+        fromSessionName: null,
+        targetMode: input.targetMode,
+        targetRole: input.targetRole,
+        targetSessionIds: input.targetSessionIds,
+        text: input.text,
+        metadata: input.metadata,
+        createdAt: "2026-06-06T00:00:00.000Z",
+        deliveries: []
+      };
+    },
+    addRoomMessageDelivery(messageId, sessionId) {
+      const delivery = { id: "delivery-1", messageId, sessionId, status: "pending" };
+      deliveries.push(delivery);
+      return delivery;
+    },
+    updateRoomMessageDelivery(id, status, error = null) {
+      const delivery = deliveries.find((item) => item.id === id);
+      delivery.status = status;
+      delivery.error = error;
+      return delivery;
+    },
+    getRoomMessage() {
+      return { id: "message-1", deliveries };
+    },
+    findByIdOrName(id) {
+      return id === planner.id ? planner : null;
+    },
+    markWorkflowAssignmentDispatched(id, messageId) {
+      assert.equal(id, assignment.id);
+      assignment.dispatchedMessageId = messageId;
+    },
+    saveInput(sessionId, text) {
+      calls.push({ type: "saveInput", sessionId, text });
+    },
+    touch(sessionId) {
+      calls.push({ type: "touch", sessionId });
+    }
+  };
+  context.tmux.send = async (session, text) => calls.push({ type: "send", sessionId: session.id, text });
+
+  const { statusCode, body } = await postJson("/api/workflows/workflow-1/start", {}, context);
+
+  assert.equal(statusCode, 200);
+  assert.equal(JSON.parse(body).workflow.runAssignments[0].dispatchedMessageId, "message-1");
+  assert.deepEqual(deliveries.map((delivery) => [delivery.sessionId, delivery.status]), [["planner-1", "sent"]]);
+  const sendCall = calls.find((call) => call.type === "send");
+  assert.equal(sendCall.sessionId, "planner-1");
+  assert.match(sendCall.text, /工作流目标：\nImplement account search/);
+  assert.match(sendCall.text, /结构化计划/);
+});
+
+test("planner room result advances the workflow and dispatches coder assignments", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-workflow-"));
+  const store = new SessionStore(path.join(dir, "test.sqlite"));
+  const planner = store.create({ kind: "runtime", cwd: dir, name: "planer" }, "/bin/bash", []);
+  const coder1 = store.create({ kind: "runtime", cwd: dir, name: "coder1" }, "/bin/bash", []);
+  const coder2 = store.create({ kind: "runtime", cwd: dir, name: "coder2" }, "/bin/bash", []);
+  const room = store.createRoom({ name: "workflow-room" });
+  store.assignSessionToRoom(room.id, planner.id, "planner");
+  store.assignSessionToRoom(room.id, coder1.id, "coder");
+  store.assignSessionToRoom(room.id, coder2.id, "coder");
+  const workflow = store.createWorkflowRun({ roomId: room.id, objective: "Build weekly GitHub viewer" });
+  const sent = [];
+  const context = {
+    config: { authToken: "secret", submitKeyDelayMs: 0 },
+    store,
+    tmux: {
+      async send(session, text) {
+        sent.push({ sessionId: session.id, text });
+      }
+    }
+  };
+
+  let response = await postJson(`/api/workflows/${workflow.id}/start`, {}, context);
+  assert.equal(response.statusCode, 200);
+  const started = store.getWorkflowRun(workflow.id);
+  const plannerAssignment = started.runAssignments.find((item) => item.role === "planner");
+  assert.ok(plannerAssignment.dispatchedMessageId);
+
+  response = await postJson(`/api/rooms/${room.id}/messages`, {
+    fromSessionId: planner.id,
+    text: "[DONE] T1 -> coder1; T2 -> coder2",
+    target: { mode: "room" },
+    metadata: { source: "agent-result", parentMessageId: plannerAssignment.dispatchedMessageId }
+  }, context);
+
+  assert.equal(response.statusCode, 201);
+  const advanced = store.getWorkflowRun(workflow.id);
+  assert.equal(advanced.status, "executing");
+  assert.equal(advanced.currentStage, "development");
+  assert.equal(advanced.runAssignments.filter((item) => item.gateKind === "development").length, 2);
+  assert.deepEqual(
+    sent.slice(1).map((item) => item.sessionId).sort(),
+    [coder1.id, coder2.id].sort()
+  );
+  assert.match(sent[1].text, /T1 -> coder1; T2 -> coder2/);
+  store.close();
+});
+
+test("custom workflow waits for all parallel stage members before advancing", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-custom-workflow-"));
+  const store = new SessionStore(path.join(dir, "test.sqlite"));
+  const reviewer1 = store.create({ kind: "runtime", cwd: dir, name: "reviewer1" }, "/bin/bash", []);
+  const reviewer2 = store.create({ kind: "runtime", cwd: dir, name: "reviewer2" }, "/bin/bash", []);
+  const publisher = store.create({ kind: "runtime", cwd: dir, name: "publisher" }, "/bin/bash", []);
+  const room = store.createRoom({ name: "release-room" });
+  store.assignSessionToRoom(room.id, reviewer1.id, "reviewer");
+  store.assignSessionToRoom(room.id, reviewer2.id, "reviewer");
+  store.assignSessionToRoom(room.id, publisher.id, "publisher");
+  const template = store.createWorkflowTemplate({
+    name: "Review and publish",
+    stages: [
+      { id: "review", name: "Review", role: "reviewer", mode: "all", prompt: "Review {objective} as {sessionName}", maxAttempts: 2 },
+      { id: "publish", name: "Publish", role: "publisher", mode: "one", prompt: "Publish after {previousResults}", maxAttempts: 1 }
+    ]
+  });
+  const workflow = store.createWorkflowRun({ roomId: room.id, objective: "Release 1.0", templateId: template.id });
+  const sent = [];
+  const context = {
+    config: { authToken: "secret", submitKeyDelayMs: 0 },
+    store,
+    tmux: { async send(session, text) { sent.push({ sessionId: session.id, text }); } }
+  };
+
+  assert.equal((await postJson(`/api/workflows/${workflow.id}/start`, {}, context)).statusCode, 200);
+  let current = store.getWorkflowRun(workflow.id);
+  const reviews = current.runAssignments.filter((item) => item.gateKind === "review");
+  assert.equal(reviews.length, 2);
+  assert.equal(sent.filter((item) => item.text.includes("Review Release 1.0")).length, 2);
+
+  for (const [index, assignment] of reviews.entries()) {
+    const response = await postJson(`/api/rooms/${room.id}/messages`, {
+      fromSessionId: assignment.sessionId,
+      text: `[DONE] review ${index + 1}`,
+      target: { mode: "room" },
+      metadata: { source: "agent-result", parentMessageId: assignment.dispatchedMessageId }
+    }, context);
+    assert.equal(response.statusCode, 201);
+    current = store.getWorkflowRun(workflow.id);
+    assert.equal(current.currentStage, index === 0 ? "review" : "publish");
+  }
+
+  const publish = current.runAssignments.find((item) => item.gateKind === "publish");
+  assert.ok(publish);
+  assert.match(sent.at(-1).text, /review 1/);
+  assert.match(sent.at(-1).text, /review 2/);
+  await postJson(`/api/rooms/${room.id}/messages`, {
+    fromSessionId: publisher.id,
+    text: "[DONE] published",
+    target: { mode: "room" },
+    metadata: { source: "agent-result", parentMessageId: publish.dispatchedMessageId }
+  }, context);
+  assert.equal(store.getWorkflowRun(workflow.id).status, "completed");
+  store.close();
 });
 
 test("/api/rooms/:id/messages records agent results without re-delivering them", async () => {

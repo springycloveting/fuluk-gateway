@@ -12,6 +12,13 @@ import { createSessionAgentManager } from "./session_agent.mjs";
 import { SessionStore } from "./store.mjs";
 import { TmuxBackend } from "./tmux.mjs";
 import { newId, normalizeLines, outputEtag, readJsonBody, sanitizeTmuxName } from "./utils.mjs";
+import {
+  assignmentChainRoot,
+  latestChainAssignment,
+  pairedSession,
+  plannerTasksForSession,
+  workflowResultOutcome
+} from "./workflow_routing.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(__dirname, "..", "public");
@@ -187,12 +194,62 @@ async function handleApi(req, res, url, context) {
     return;
   }
 
+  if (pathname === "/api/workflow-templates") {
+    if (method === "GET") {
+      sendJson(res, 200, { templates: store.listWorkflowTemplates() });
+      return;
+    }
+    if (method === "POST") {
+      sendJson(res, 201, { template: store.createWorkflowTemplate(await readJsonBody(req)) });
+      return;
+    }
+  }
+
+  const workflowTemplateRoute = pathname.match(/^\/api\/workflow-templates\/([^/]+)$/);
+  if (workflowTemplateRoute) {
+    const templateId = decodeURIComponent(workflowTemplateRoute[1]);
+    if (method === "PUT") {
+      sendJson(res, 200, { template: store.updateWorkflowTemplate(templateId, await readJsonBody(req)) });
+      return;
+    }
+    if (method === "DELETE") {
+      sendJson(res, 200, { ok: store.deleteWorkflowTemplate(templateId) });
+      return;
+    }
+  }
+
   const roomRoute = pathname.match(/^\/api\/rooms\/([^/]+)(?:\/([^/]+))?$/);
   if (roomRoute) {
     const roomId = decodeURIComponent(roomRoute[1]);
     const action = roomRoute[2] ?? "";
     await handleRoomAction(req, res, method, roomId, action, context);
     return;
+  }
+
+  const workflowRoute = pathname.match(/^\/api\/workflows\/([^/]+)(?:\/([^/]+))?$/);
+  if (workflowRoute) {
+    const runId = decodeURIComponent(workflowRoute[1]);
+    const action = workflowRoute[2] ?? "";
+    if (method === "GET" && action === "") {
+      const workflow = store.getWorkflowRun(runId);
+      if (!workflow) throw new Error(`Workflow run not found: ${runId}`);
+      sendJson(res, 200, { workflow });
+      return;
+    }
+    if (method === "POST" && action === "start") {
+      const body = await readJsonBody(req);
+      const workflow = store.startWorkflowRun(runId, body);
+      if (workflow.templateDefinition?.kind === "linear") await dispatchPendingWorkflowAssignments(workflow, context);
+      else await dispatchPendingPlannerAssignments(workflow, context);
+      sendJson(res, 200, { workflow: store.getWorkflowRun(runId) });
+      return;
+    }
+    if (method === "POST" && action === "advance") {
+      await reconcileWorkflowResults(runId, context);
+      await dispatchPendingWorkflowAssignments(store.getWorkflowRun(runId), context, { redispatch: true });
+      sendJson(res, 200, { workflow: store.getWorkflowRun(runId) });
+      return;
+    }
   }
 
   const sessionRoute = pathname.match(/^\/api\/sessions\/([^/]+)(?:\/([^/]+))?$/);
@@ -232,9 +289,21 @@ async function handleRoomAction(req, res, method, roomId, action, context) {
     return;
   }
 
+  if (method === "GET" && action === "workflows") {
+    sendJson(res, 200, { workflows: store.listWorkflowRuns(roomId) });
+    return;
+  }
+
+  if (method === "POST" && action === "workflows") {
+    const body = await readJsonBody(req);
+    sendJson(res, 201, { workflow: store.createWorkflowRun({ roomId, objective: body.objective, templateId: body.templateId }) });
+    return;
+  }
+
   if (method === "POST" && action === "messages") {
     const body = await readJsonBody(req);
     const result = await dispatchRoomMessage(roomId, body, context);
+    if (body.metadata?.source === "agent-result") await advanceWorkflowFromResult(result.message, context);
     sendJson(res, 201, result);
     return;
   }
@@ -262,6 +331,350 @@ async function handleRoomAction(req, res, method, roomId, action, context) {
   }
 
   sendJson(res, 404, { error: "Not found" });
+}
+
+async function dispatchPendingPlannerAssignments(workflow, context) {
+  for (const assignment of workflow.runAssignments ?? []) {
+    if (assignment.role !== "planner" || assignment.status !== "pending" || assignment.dispatchedMessageId) continue;
+    const result = await dispatchRoomMessage(workflow.roomId, {
+      text: [
+        "你是该项目工作流的 Planner。",
+        "请分析目标，拆解为可执行任务，明确依赖关系、验收标准，并将任务合理分配给房间中的 coder。",
+        "完成后把结构化计划发送回项目房间，内容需包含每个任务的标题、说明、依赖、验收标准和建议负责人。",
+        "",
+        `工作流目标：\n${workflow.objective}`
+      ].join("\n"),
+      target: { mode: "session", sessionIds: [assignment.sessionId] },
+      metadata: {
+        source: "workflow-assignment",
+        workflowRunId: workflow.id,
+        assignmentId: assignment.id,
+        role: assignment.role,
+        gateKind: assignment.gateKind,
+        attemptNo: assignment.attemptNo
+      }
+    }, context);
+    const delivered = result.message.deliveries?.some(
+      (delivery) => delivery.sessionId === assignment.sessionId && delivery.status === "sent"
+    );
+    if (delivered) context.store.markWorkflowAssignmentDispatched(assignment.id, result.message.id);
+  }
+}
+
+async function reconcileWorkflowResults(runId, context) {
+  const workflow = context.store.getWorkflowRun(runId);
+  if (!workflow) throw new Error(`Workflow run not found: ${runId}`);
+  const messages = context.store.listRoomMessages(workflow.roomId, 500);
+  for (const message of messages) {
+    if (message.metadata?.source === "agent-result") await advanceWorkflowFromResult(message, context);
+  }
+}
+
+async function advanceWorkflowFromResult(message, context) {
+  const parentId = message.metadata?.parentMessageId;
+  if (!parentId) return;
+  const parent = context.store.getRoomMessage(parentId);
+  const assignmentId = parent?.metadata?.assignmentId;
+  const runId = parent?.metadata?.workflowRunId;
+  if (!assignmentId || !runId) return;
+  const assignment = context.store.getWorkflowAssignment(assignmentId);
+  const workflow = context.store.getWorkflowRun(runId);
+  if (!assignment || !workflow || workflow.roomId !== message.roomId) return;
+  if (assignment.sessionId !== message.fromSessionId) throw new Error("Workflow result sender does not match assignment");
+  if (assignment.resultMessageId) return;
+
+  const outcome = workflowResultOutcome(message.text);
+  const finished = context.store.finishWorkflowAssignment(assignment.id, outcome, message.id);
+  if (!finished.changed) return;
+
+  if (workflow.templateDefinition?.kind === "linear") {
+    await advanceLinearWorkflow(workflow, assignment, outcome, message, context);
+    return;
+  }
+
+  if (assignment.gateKind === "planning") {
+    if (outcome !== "completed") return handleWorkflowRetry(workflow, assignment, message, context);
+    const coders = roomMembersWithRole(context.store.getRoom(workflow.roomId), "coder");
+    if (!coders.length) return requireWorkflowHuman(workflow, "Planner 已完成，但房间内没有运行中的 coder 会话。", context);
+    for (const coder of coders) {
+      context.store.createWorkflowAssignment({
+        runId: workflow.id,
+        gateKind: "development",
+        role: "coder",
+        sessionId: coder.sessionId,
+        attemptNo: 1
+      });
+    }
+    context.store.updateWorkflowRunState(workflow.id, "executing", "development");
+    await dispatchPendingWorkflowAssignments(context.store.getWorkflowRun(workflow.id), context, { plannerResult: message.text });
+    return;
+  }
+
+  if (assignment.gateKind === "development") {
+    if (outcome !== "completed") return handleWorkflowRetry(workflow, assignment, message, context);
+    const tester = pairedSession(context.store.getRoom(workflow.roomId), assignment.sessionId, "coder", "tester");
+    if (!tester) return requireWorkflowHuman(workflow, "Coder 已完成，但找不到对应的 tester 会话。", context);
+    context.store.createWorkflowAssignment({
+      runId: workflow.id,
+      workItemId: assignment.workItemId || assignment.id,
+      gateKind: "testing",
+      role: "tester",
+      sessionId: tester.sessionId,
+      attemptNo: assignment.attemptNo
+    });
+    context.store.updateWorkflowRunState(workflow.id, "executing", "testing");
+    await dispatchPendingWorkflowAssignments(context.store.getWorkflowRun(workflow.id), context);
+    return;
+  }
+
+  if (assignment.gateKind === "testing") {
+    if (outcome !== "completed") return retryCoderAfterTestFailure(workflow, assignment, message, context);
+    if (!workflowReadyForIntegration(context.store.getWorkflowRun(workflow.id))) return;
+    const testerAll = roomMembersWithRole(context.store.getRoom(workflow.roomId), "testerall")[0];
+    if (!testerAll) return requireWorkflowHuman(workflow, "分项测试已通过，但房间内没有运行中的 testerall 会话。", context);
+    if (!context.store.getWorkflowRun(workflow.id).runAssignments.some((item) => item.gateKind === "integration")) {
+      context.store.createWorkflowAssignment({
+        runId: workflow.id,
+        gateKind: "integration",
+        role: "testerall",
+        sessionId: testerAll.sessionId,
+        attemptNo: 1
+      });
+    }
+    context.store.updateWorkflowRunState(workflow.id, "integration_testing", "integration_testing");
+    await dispatchPendingWorkflowAssignments(context.store.getWorkflowRun(workflow.id), context);
+    return;
+  }
+
+  if (assignment.gateKind === "integration") {
+    if (outcome === "completed") {
+      context.store.updateWorkflowRunState(workflow.id, "completed", "completed", { completed: true });
+      await postWorkflowRoomNotice(workflow, "[DONE] 工作流的完整功能和回归测试已通过。", context);
+      return;
+    }
+    return handleWorkflowRetry(workflow, assignment, message, context);
+  }
+}
+
+async function advanceLinearWorkflow(workflow, assignment, outcome, message, context) {
+  const definition = workflow.templateDefinition;
+  const stageIndex = definition.stages.findIndex((stage) => stage.id === assignment.gateKind);
+  const stage = definition.stages[stageIndex];
+  if (!stage) return requireWorkflowHuman(workflow, `工作流模板中找不到阶段：${assignment.gateKind}`, context);
+
+  if (outcome !== "completed") {
+    if (assignment.attemptNo >= stage.maxAttempts) {
+      return requireWorkflowHuman(
+        workflow,
+        `${stage.name} 的 ${assignment.role} 连续 ${assignment.attemptNo} 次未成功。\n\n最后结果：\n${message.text}`,
+        context
+      );
+    }
+    context.store.createWorkflowAssignment({
+      runId: workflow.id,
+      workItemId: assignment.workItemId || assignment.id,
+      gateKind: stage.id,
+      role: stage.role,
+      sessionId: assignment.sessionId,
+      attemptNo: assignment.attemptNo + 1
+    });
+    await dispatchPendingWorkflowAssignments(context.store.getWorkflowRun(workflow.id), context);
+    return;
+  }
+
+  const current = context.store.getWorkflowRun(workflow.id);
+  const latestBySession = new Map();
+  for (const item of current.runAssignments.filter((item) => item.gateKind === stage.id)) {
+    const previous = latestBySession.get(item.sessionId);
+    if (!previous || item.attemptNo > previous.attemptNo) latestBySession.set(item.sessionId, item);
+  }
+  if ([...latestBySession.values()].some((item) => item.status !== "completed")) return;
+
+  const nextStage = definition.stages[stageIndex + 1];
+  if (!nextStage) {
+    context.store.updateWorkflowRunState(workflow.id, "completed", "completed", { completed: true });
+    await postWorkflowRoomNotice(workflow, `[DONE] 自定义工作流“${workflow.templateName}”已完成。`, context);
+    return;
+  }
+
+  const room = context.store.getRoom(workflow.roomId);
+  const members = roomMembersWithRole(room, nextStage.role);
+  const targets = nextStage.mode === "all" ? members : members.slice(0, 1);
+  if (!targets.length) return requireWorkflowHuman(workflow, `${nextStage.name} 找不到运行中的 ${nextStage.role} 会话。`, context);
+  for (const target of targets) {
+    context.store.createWorkflowAssignment({
+      runId: workflow.id,
+      gateKind: nextStage.id,
+      role: nextStage.role,
+      sessionId: target.sessionId,
+      attemptNo: 1
+    });
+  }
+  context.store.updateWorkflowRunState(workflow.id, "executing", nextStage.id);
+  await dispatchPendingWorkflowAssignments(context.store.getWorkflowRun(workflow.id), context);
+}
+
+async function handleWorkflowRetry(workflow, assignment, message, context) {
+  if (assignment.attemptNo >= 3) {
+    return requireWorkflowHuman(
+      workflow,
+      `${assignment.role} 连续 ${assignment.attemptNo} 次未成功，需要人工介入。\n\n最后结果：\n${message.text}`,
+      context
+    );
+  }
+  context.store.createWorkflowAssignment({
+    runId: workflow.id,
+    workItemId: assignment.workItemId || assignment.id,
+    gateKind: assignment.gateKind,
+    role: assignment.role,
+    sessionId: assignment.sessionId,
+    attemptNo: assignment.attemptNo + 1
+  });
+  await dispatchPendingWorkflowAssignments(context.store.getWorkflowRun(workflow.id), context);
+}
+
+async function retryCoderAfterTestFailure(workflow, testerAssignment, message, context) {
+  const assignments = context.store.getWorkflowRun(workflow.id).runAssignments;
+  const coder = assignments
+    .filter((item) => item.gateKind === "development" && (item.workItemId || item.id) === testerAssignment.workItemId)
+    .sort((a, b) => b.attemptNo - a.attemptNo)[0];
+  if (!coder || coder.attemptNo >= 3) {
+    return requireWorkflowHuman(workflow, `分项测试连续失败，需要人工介入。\n\n最后结果：\n${message.text}`, context);
+  }
+  context.store.createWorkflowAssignment({
+    runId: workflow.id,
+    workItemId: testerAssignment.workItemId,
+    gateKind: "development",
+    role: "coder",
+    sessionId: coder.sessionId,
+    attemptNo: coder.attemptNo + 1
+  });
+  context.store.updateWorkflowRunState(workflow.id, "executing", "development");
+  await dispatchPendingWorkflowAssignments(context.store.getWorkflowRun(workflow.id), context);
+}
+
+function workflowReadyForIntegration(workflow) {
+  const development = workflow.runAssignments.filter((item) => item.gateKind === "development");
+  const roots = [...new Set(development.map((item) => item.workItemId || item.id))];
+  return roots.length > 0 && roots.every((root) => {
+    const latestCoder = development
+      .filter((item) => (item.workItemId || item.id) === root)
+      .sort((a, b) => b.attemptNo - a.attemptNo)[0];
+    const latestTester = workflow.runAssignments
+      .filter((item) => item.gateKind === "testing" && item.workItemId === root)
+      .sort((a, b) => b.attemptNo - a.attemptNo)[0];
+    return latestCoder?.status === "completed" && latestTester?.status === "completed";
+  });
+}
+
+async function dispatchPendingWorkflowAssignments(workflow, context, details = {}) {
+  if (!workflow) return;
+  const plannerResult = details.plannerResult || workflowPlannerResult(workflow, context.store);
+  for (const assignment of workflow.runAssignments ?? []) {
+    if (assignment.status !== "pending" || (assignment.dispatchedMessageId && !details.redispatch)) continue;
+    const text = workflowAssignmentText(workflow, assignment, plannerResult, context.store, details.redispatch);
+    const result = await dispatchRoomMessage(workflow.roomId, {
+      text,
+      target: { mode: "session", sessionIds: [assignment.sessionId] },
+      metadata: {
+        source: "workflow-assignment",
+        workflowRunId: workflow.id,
+        assignmentId: assignment.id,
+        role: assignment.role,
+        gateKind: assignment.gateKind,
+        attemptNo: assignment.attemptNo
+      }
+    }, context);
+    const sent = result.message.deliveries?.some(
+      (delivery) => delivery.sessionId === assignment.sessionId && delivery.status === "sent"
+    );
+    if (sent) context.store.markWorkflowAssignmentDispatched(assignment.id, result.message.id);
+  }
+}
+
+function workflowPlannerResult(workflow, store) {
+  const planner = workflow.runAssignments.find((item) => item.gateKind === "planning" && item.resultMessageId);
+  return planner ? store.getRoomMessage(planner.resultMessageId)?.text || "" : "";
+}
+
+function workflowAssignmentText(workflow, assignment, plannerResult, store, redispatch = false) {
+  const room = store.getRoom(workflow.roomId);
+  const assignee = room?.sessions?.find((item) => item.sessionId === assignment.sessionId);
+  const chainRoot = assignmentChainRoot(assignment);
+  const priorResult = workflowPriorResult(workflow, assignment, store);
+  const retry = assignment.attemptNo > 1 && priorResult ? `\n\n上次失败反馈：\n${priorResult}` : "";
+  const reminder = redispatch && assignment.dispatchedMessageId ? "这是未收到回传结果的任务提醒。业务完成后必须调用回调 API 回传 [DONE]，不要只在终端输出结论。\n\n" : "";
+  if (workflow.templateDefinition?.kind === "linear") {
+    const stage = workflow.templateDefinition.stages.find((item) => item.id === assignment.gateKind);
+    const previousResults = linearPreviousResults(workflow, assignment, store);
+    return `${reminder}${renderWorkflowPrompt(stage?.prompt || "执行当前阶段任务。", {
+      objective: workflow.objective,
+      sessionName: assignee?.sessionName || assignment.role,
+      role: assignment.role,
+      previousResults
+    })}\n\n完成后必须通过房间回调返回 [DONE]；失败返回 [FAIL]，阻塞返回 [BLOCKED]。${retry}`;
+  }
+  if (assignment.gateKind === "planning") {
+    return `你是该项目工作流的 Planner。请分析目标，拆解为可执行任务，明确依赖关系、验收标准，并将任务合理分配给房间中的 coder。完成后把结构化计划发送回项目房间。\n\n工作流目标：\n${workflow.objective}${retry}`;
+  }
+  if (assignment.gateKind === "development") {
+    const tasks = plannerTasksForSession(plannerResult, assignee?.sessionName);
+    return `${reminder}你是工作流中的 ${assignee?.sessionName || assignment.role}。只执行下面明确分配给你的开发任务，不要执行其他 coder 的任务。完成代码和必要测试后回传 [DONE]；失败回传 [FAIL]。\n\n工作流目标：\n${workflow.objective}\n\n你的专属任务：\n${tasks}${retry}`;
+  }
+  if (assignment.gateKind === "testing") {
+    const coder = latestChainAssignment(workflow, "development", chainRoot);
+    const coderSession = room?.sessions?.find((item) => item.sessionId === coder?.sessionId);
+    const tasks = plannerTasksForSession(plannerResult, coderSession?.sessionName);
+    return `${reminder}你是 ${assignee?.sessionName || "tester"}，只测试 ${coderSession?.sessionName || "对应 Coder"} 的下列任务。不要测试其他 coder 的任务。通过回传 [DONE]，不通过回传 [FAIL] 并列出可复现证据。\n\n工作流目标：\n${workflow.objective}\n\n待测任务：\n${tasks}\n\n${coderSession?.sessionName || "Coder"} 结果：\n${priorResult || "请检查当前工作区实现。"}`;
+  }
+  return `你是 testerall。所有分项开发和测试已完成，请执行完整功能、端到端和回归测试。通过回传 [DONE]，失败回传 [FAIL] 并提供证据。\n\n工作流目标：\n${workflow.objective}\n\nPlanner 计划：\n${plannerResult}${retry}`;
+}
+
+function linearPreviousResults(workflow, assignment, store) {
+  const stages = workflow.templateDefinition?.stages ?? [];
+  const currentIndex = stages.findIndex((stage) => stage.id === assignment.gateKind);
+  const priorIds = new Set(stages.slice(0, Math.max(0, currentIndex)).map((stage) => stage.id));
+  return workflow.runAssignments
+    .filter((item) => priorIds.has(item.gateKind) && item.resultMessageId && item.status === "completed")
+    .map((item) => store.getRoomMessage(item.resultMessageId)?.text)
+    .filter(Boolean)
+    .join("\n\n---\n\n");
+}
+
+function renderWorkflowPrompt(prompt, values) {
+  return String(prompt).replace(/\{(objective|sessionName|role|previousResults)\}/g, (_, key) => values[key] || "");
+}
+
+function workflowPriorResult(workflow, assignment, store) {
+  const chainRoot = assignmentChainRoot(assignment);
+  let prior;
+  if (assignment.gateKind === "testing") prior = latestChainAssignment(workflow, "development", chainRoot);
+  if (assignment.gateKind === "development" && assignment.attemptNo > 1) prior = latestChainAssignment(workflow, "testing", chainRoot);
+  if (assignment.gateKind === "integration") {
+    return workflow.runAssignments
+      .filter((item) => item.gateKind === "testing" && item.resultMessageId)
+      .map((item) => store.getRoomMessage(item.resultMessageId)?.text)
+      .filter(Boolean)
+      .join("\n\n---\n\n");
+  }
+  return prior?.resultMessageId ? store.getRoomMessage(prior.resultMessageId)?.text || "" : "";
+}
+
+function roomMembersWithRole(room, role) {
+  return (room?.sessions ?? []).filter((item) => item.sessionStatus === "running" && roomRoleMatches(item, role));
+}
+
+async function requireWorkflowHuman(workflow, reason, context) {
+  context.store.updateWorkflowRunState(workflow.id, "needs_human", "needs_human");
+  await postWorkflowRoomNotice(workflow, `[BLOCKED] 工作流需要人工介入。\n\n${reason}`, context);
+}
+
+async function postWorkflowRoomNotice(workflow, text, context) {
+  await dispatchRoomMessage(workflow.roomId, {
+    text,
+    target: { mode: "room" },
+    metadata: { source: "workflow-system", workflowRunId: workflow.id }
+  }, context);
 }
 
 async function dispatchRoomMessage(roomId, body, context) {
