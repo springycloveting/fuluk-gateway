@@ -97,7 +97,29 @@ export class TmuxBackend {
 
   async sendKeys(record, keys) {
     await this.ensureSessionExists(record);
-    await this.run("tmux", ["send-keys", "-t", exactTmuxPaneTarget(record.tmuxSessionName), ...keys]);
+    const target = exactTmuxPaneTarget(record.tmuxSessionName);
+    const wheelButtons = [];
+    const plainKeys = [];
+    for (const key of keys) {
+      const button = wheelToSgrButton(key);
+      if (button === null) plainKeys.push(key);
+      else wheelButtons.push(button);
+    }
+    if (plainKeys.length) {
+      await this.run("tmux", ["send-keys", "-t", target, ...plainKeys]);
+    }
+    if (wheelButtons.length) {
+      const { stdout } = await this.run("tmux", [
+        "display-message",
+        "-p",
+        "-t",
+        target,
+        "#{pane_width},#{pane_height}"
+      ]);
+      const { col, row } = parsePaneGeometry(stdout);
+      const payload = wheelButtons.map((button) => `\x1b[<${button};${col};${row}M`).join("");
+      await this.run("tmux", ["send-keys", "-t", target, "-l", "--", payload]);
+    }
   }
 
   async resize(record, cols, rows) {
@@ -113,15 +135,33 @@ export class TmuxBackend {
     ]);
   }
 
-  async capture(record, lines) {
+  async capture(record, lines, options = {}) {
     await this.ensureSessionExists(record);
-    const { stdout } = await this.run("tmux", [
-      "capture-pane",
-      "-pt",
-      exactTmuxPaneTarget(record.tmuxSessionName),
-      "-S",
-      `-${lines}`
-    ]);
+    const flags = options.preserveEscapes ? "-ept" : "-pt";
+    const alternateFlags = options.preserveEscapes ? "-eapt" : "-apt";
+    const offset = normalizeCaptureOffset(options.offset);
+    const rangeArgs = offset > 0 ? ["-S", `-${lines + offset}`, "-E", `-${offset}`] : ["-S", `-${lines}`];
+    let result;
+    try {
+      result = await this.run("tmux", [
+        "capture-pane",
+        flags,
+        exactTmuxPaneTarget(record.tmuxSessionName),
+        ...rangeArgs
+      ]);
+    } catch (error) {
+      if (!options.alternateScreen) throw error;
+      result = { stdout: "" };
+    }
+    if (options.alternateScreen && !result.stdout.trim()) {
+      result = await this.run("tmux", [
+        "capture-pane",
+        alternateFlags,
+        exactTmuxPaneTarget(record.tmuxSessionName),
+        ...rangeArgs
+      ]);
+    }
+    const { stdout } = result;
     return stdout;
   }
 
@@ -206,6 +246,29 @@ export function exactTmuxSessionTarget(name) {
 
 export function exactTmuxPaneTarget(name) {
   return `=${name}:`;
+}
+
+function normalizeCaptureOffset(value) {
+  const parsed = typeof value === "string" ? Number.parseInt(value, 10) : Number(value);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.min(Math.max(parsed, 0), 5000);
+}
+
+function wheelToSgrButton(key) {
+  if (key === "WheelUpPane") return 64;
+  if (key === "WheelDownPane") return 65;
+  return null;
+}
+
+function parsePaneGeometry(stdout) {
+  const match = /^(\d+),(\d+)/.exec(stdout.trim());
+  if (!match) throw new Error(`could not parse tmux pane geometry: ${stdout}`);
+  const width = Number.parseInt(match[1], 10);
+  const height = Number.parseInt(match[2], 10);
+  return {
+    col: Math.floor(width / 2) + 1,
+    row: Math.floor(height / 2) + 1
+  };
 }
 
 function shellQuote(value) {

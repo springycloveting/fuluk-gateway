@@ -1,10 +1,10 @@
 # Fuluk Gateway
 
-Fuluk Gateway 是一个面向长时间运行 AI CLI 会话的 Web 和 REST 接口。它使用宿主机上的 `tmux` 来管理 `codex`、`claude`、`opencode` 以及本地 shell 会话。
+Fuluk Gateway 是一个面向长时间运行 AI CLI 会话的 Web 和 REST 接口。它使用宿主机上的 `tmux` 来管理 `codex`、`claude`、`opencode`、`pi-os` 以及本地 shell 会话。
 
-推荐的生产部署方式是在宿主机级别运行 `systemd` 服务。网关会有意运行在宿主机上，这样它可以控制宿主机的 `tmux`，并且可以选择通过 `docker exec` 运行 AI CLI
+推荐的生产部署方式是在宿主机级别运行 `systemd` 服务。网关会有意运行在宿主机上，这样它可以控制宿主机的 `tmux`，并且可以选择通过 `docker exec` 运行 AI CLI。
 
-Fuluk Gateway is a Web and REST interface for long-running AI CLI sessions. It uses host `tmux` to manage `codex`, `claude`, `opencode`, and local shell sessions.
+Fuluk Gateway is a Web and REST interface for long-running AI CLI sessions. It uses host `tmux` to manage `codex`, `claude`, `opencode`, `pi-os`, and local shell sessions.
 
 The recommended production deployment is a host-level `systemd` service. The gateway intentionally runs on the host so it can control host `tmux` and optionally run AI CLIs through `docker exec`.
 
@@ -22,9 +22,14 @@ The recommended production deployment is a host-level `systemd` service. The gat
 * Web UI for session management
 * REST API for programmatic control
 * Natural language command interface with AI assistant (web-pi)
-* Support for codex, claude, opencode, and runtime sessions
+* Support for codex, claude, opencode, pi-os, and runtime sessions
+* **Room-based multi-agent collaboration** with role assignment
+* **Workflow templates** for structured multi-stage task execution
+* **Workflow supervisor** for automated monitoring and intervention
+* **Project manager agent** for intelligent workflow oversight
 * Docker worker mode for AI CLI isolation
 * SQLite-based session persistence
+* WebSocket real-time task state notifications
 
 ## Requirements
 
@@ -32,7 +37,7 @@ The recommended production deployment is a host-level `systemd` service. The gat
 * Node.js 22+
 * npm
 * Optional: Docker, when using Docker worker mode for AI CLIs
-* Optional: `codex`, `claude`, or `opencode` on the host when using non-Docker mode
+* Optional: `codex`, `claude`, `opencode`, or `pi-os` on the host when using non-Docker mode
 
 ## Quick Development Run
 
@@ -168,9 +173,14 @@ Fuluk Gateway 是一个面向长时间运行 AI CLI 会话的 Web 和 REST 接�
 * 会话管理 Web 界面
 * 可编程控制的 REST API
 * 自然语言命令接口与 AI 助手 (web-pi)
-* 支持 codex、claude、opencode 和 runtime 会话
+* 支持 codex、claude、opencode、pi-os 和 runtime 会话
+* **基于房间的多 Agent 协作**，支持角色分配
+* **工作流模板**，用于结构化多阶段任务执行
+* **工作流监督器**，自动监控和干预
+* **项目管理 Agent**，智能工作流监督
 * Docker worker 模式实现 AI CLI 隔离
 * 基于 SQLite 的会话持久化
+* WebSocket 实时任务状态通知
 
 ## 环境要求
 
@@ -178,7 +188,7 @@ Fuluk Gateway 是一个面向长时间运行 AI CLI 会话的 Web 和 REST 接�
 * Node.js 22+
 * npm
 * 可选：Docker，用于 AI CLI 的 Docker worker 模式
-* 可选：当使用非 Docker 模式时，宿主机上需要安装 `codex`、`claude` 或 `opencode`
+* 可选：当使用非 Docker 模式时，宿主机上需要安装 `codex`、`claude`、`opencode` 或 `pi-os`
 
 ## 快速开发运行
 

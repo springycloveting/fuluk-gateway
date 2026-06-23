@@ -497,9 +497,41 @@ export class SessionStore {
       .map((row) => this.withWorkflowDetails(mapWorkflowRunRow(row)));
   }
 
+  listActiveWorkflowRuns() {
+    const statuses = ["planning", "executing", "integration_testing", "security_review", "blocked"];
+    return this.db
+      .prepare(
+        `select * from workflow_runs
+         where status in (${statuses.map(() => "?").join(", ")})
+         order by updated_at asc, created_at asc`
+      )
+      .all(...statuses)
+      .map((row) => this.withWorkflowDetails(mapWorkflowRunRow(row)));
+  }
+
   getWorkflowRun(runId) {
     const row = this.db.prepare("select * from workflow_runs where id = ?").get(runId);
     return row ? this.withWorkflowDetails(mapWorkflowRunRow(row)) : null;
+  }
+
+  deleteWorkflowRun(runId) {
+    const run = this.getWorkflowRun(runId);
+    if (!run) return false;
+    this.db.exec("begin immediate");
+    try {
+      this.db.prepare("delete from workflow_supervisor_leases where run_id = ?").run(run.id);
+      this.db.prepare("delete from workflow_interventions where run_id = ?").run(run.id);
+      this.db.prepare("delete from workflow_observations where run_id = ?").run(run.id);
+      this.db.prepare("delete from workflow_events where run_id = ?").run(run.id);
+      this.db.prepare("delete from workflow_assignments where run_id = ?").run(run.id);
+      this.db.prepare("delete from workflow_runs where id = ?").run(run.id);
+      this.touchRoom(run.roomId);
+      this.db.exec("commit");
+      return true;
+    } catch (error) {
+      this.db.exec("rollback");
+      throw error;
+    }
   }
 
   startWorkflowRun(runId, input = {}) {
@@ -541,8 +573,8 @@ export class SessionStore {
 
   markWorkflowAssignmentDispatched(assignmentId, messageId) {
     this.db.prepare(
-      "update workflow_assignments set dispatched_message_id = ?, updated_at = ? where id = ?"
-    ).run(messageId, nowIso(), assignmentId);
+      "update workflow_assignments set dispatched_message_id = ?, last_activity_at = ?, updated_at = ? where id = ?"
+    ).run(messageId, nowIso(), nowIso(), assignmentId);
     const row = this.db.prepare("select * from workflow_assignments where id = ?").get(assignmentId);
     return row ? mapWorkflowAssignmentRow(row) : null;
   }
@@ -581,10 +613,29 @@ export class SessionStore {
   finishWorkflowAssignment(assignmentId, status, resultMessageId) {
     const result = this.db.prepare(
       `update workflow_assignments
-       set status = ?, result_message_id = ?, updated_at = ?, finished_at = ?
-       where id = ? and result_message_id is null`
-    ).run(status, resultMessageId, nowIso(), nowIso(), assignmentId);
+       set status = ?, result_message_id = ?, last_activity_at = ?, updated_at = ?, finished_at = ?
+       where id = ? and result_message_id is null and status = 'pending'`
+    ).run(status, resultMessageId, nowIso(), nowIso(), nowIso(), assignmentId);
     return { changed: Number(result.changes) > 0, assignment: this.getWorkflowAssignment(assignmentId) };
+  }
+
+  updateWorkflowAssignmentStatus(assignmentId, status, options = {}) {
+    const timestamp = nowIso();
+    this.db.prepare(
+      `update workflow_assignments
+       set status = ?,
+           supervisor_state = ?,
+           updated_at = ?,
+           finished_at = ?
+       where id = ?`
+    ).run(
+      status,
+      options.supervisorState ?? status,
+      timestamp,
+      options.finished === false ? null : timestamp,
+      assignmentId
+    );
+    return this.getWorkflowAssignment(assignmentId);
   }
 
   updateWorkflowRunState(runId, status, currentStage, options = {}) {
@@ -638,6 +689,200 @@ export class SessionStore {
       .all(run.id)
       .map(mapWorkflowAssignmentRow);
     return { ...run, workItems: [], runAssignments, artifacts: [] };
+  }
+
+  createWorkflowObservation(input = {}) {
+    const workflow = this.getWorkflowRun(input.runId);
+    if (!workflow) throw new Error(`Workflow run not found: ${input.runId}`);
+    const timestamp = nowIso();
+    const observation = {
+      id: newId(),
+      runId: workflow.id,
+      roomId: workflow.roomId,
+      tickId: input.tickId || newId(),
+      snapshot: input.snapshot && typeof input.snapshot === "object" ? input.snapshot : {},
+      detectedIssues: Array.isArray(input.detectedIssues) ? input.detectedIssues : [],
+      createdAt: timestamp
+    };
+    this.db.prepare(
+      `insert into workflow_observations (
+        id, run_id, room_id, tick_id, snapshot_json, detected_issues_json, created_at
+      ) values (?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      observation.id,
+      observation.runId,
+      observation.roomId,
+      observation.tickId,
+      JSON.stringify(observation.snapshot),
+      JSON.stringify(observation.detectedIssues),
+      observation.createdAt
+    );
+    return this.getWorkflowObservation(observation.id);
+  }
+
+  getWorkflowObservation(id) {
+    const row = this.db.prepare("select * from workflow_observations where id = ?").get(id);
+    return row ? mapWorkflowObservationRow(row) : null;
+  }
+
+  listWorkflowObservations(runId, limit = 20) {
+    return this.db
+      .prepare(
+        `select * from workflow_observations
+         where run_id = ?
+         order by created_at desc, id desc
+         limit ?`
+      )
+      .all(runId, Math.min(Math.max(Number(limit) || 20, 1), 100))
+      .map(mapWorkflowObservationRow);
+  }
+
+  createWorkflowIntervention(input = {}) {
+    const workflow = this.getWorkflowRun(input.runId);
+    if (!workflow) throw new Error(`Workflow run not found: ${input.runId}`);
+    const timestamp = nowIso();
+    const intervention = {
+      id: newId(),
+      runId: workflow.id,
+      roomId: workflow.roomId,
+      observationId: input.observationId ?? null,
+      source: input.source || "rule",
+      actionType: input.actionType || "observe_only",
+      targetSessionId: input.targetSessionId ?? null,
+      targetRole: input.targetRole ?? null,
+      assignmentId: input.assignmentId ?? null,
+      workItemId: input.workItemId ?? null,
+      reason: input.reason ?? null,
+      instruction: input.instruction ?? null,
+      decision: input.decision && typeof input.decision === "object" ? input.decision : {},
+      validationStatus: input.validationStatus || "accepted",
+      validationError: input.validationError ?? null,
+      dispatchedMessageId: input.dispatchedMessageId ?? null,
+      createdAt: timestamp,
+      executedAt: input.executedAt ?? null
+    };
+    this.db.prepare(
+      `insert into workflow_interventions (
+        id, run_id, room_id, observation_id, source, action_type, target_session_id, target_role,
+        assignment_id, work_item_id, reason, instruction, decision_json, validation_status,
+        validation_error, dispatched_message_id, created_at, executed_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      intervention.id,
+      intervention.runId,
+      intervention.roomId,
+      intervention.observationId,
+      intervention.source,
+      intervention.actionType,
+      intervention.targetSessionId,
+      intervention.targetRole,
+      intervention.assignmentId,
+      intervention.workItemId,
+      intervention.reason,
+      intervention.instruction,
+      JSON.stringify(intervention.decision),
+      intervention.validationStatus,
+      intervention.validationError,
+      intervention.dispatchedMessageId,
+      intervention.createdAt,
+      intervention.executedAt
+    );
+    return this.getWorkflowIntervention(intervention.id);
+  }
+
+  getWorkflowIntervention(id) {
+    const row = this.db.prepare("select * from workflow_interventions where id = ?").get(id);
+    return row ? mapWorkflowInterventionRow(row) : null;
+  }
+
+  updateWorkflowIntervention(id, input = {}) {
+    const current = this.getWorkflowIntervention(id);
+    if (!current) throw new Error(`Workflow intervention not found: ${id}`);
+    this.db.prepare(
+      `update workflow_interventions
+       set validation_status = ?, validation_error = ?, dispatched_message_id = ?, executed_at = ?
+       where id = ?`
+    ).run(
+      input.validationStatus ?? current.validationStatus,
+      input.validationError ?? current.validationError,
+      input.dispatchedMessageId ?? current.dispatchedMessageId,
+      input.executedAt ?? current.executedAt,
+      id
+    );
+    return this.getWorkflowIntervention(id);
+  }
+
+  listWorkflowInterventions(runId, limit = 50) {
+    return this.db
+      .prepare(
+        `select * from workflow_interventions
+         where run_id = ?
+         order by created_at desc, id desc
+         limit ?`
+      )
+      .all(runId, Math.min(Math.max(Number(limit) || 50, 1), 200))
+      .map(mapWorkflowInterventionRow);
+  }
+
+  findRecentWorkflowIntervention(input = {}) {
+    const row = this.db
+      .prepare(
+        `select * from workflow_interventions
+         where run_id = ?
+           and action_type = ?
+           and coalesce(assignment_id, '') = coalesce(?, '')
+           and created_at >= ?
+         order by created_at desc, id desc
+         limit 1`
+      )
+      .get(input.runId, input.actionType, input.assignmentId ?? null, input.sinceIso);
+    return row ? mapWorkflowInterventionRow(row) : null;
+  }
+
+  markWorkflowAssignmentReminded(assignmentId, messageId = null) {
+    const timestamp = nowIso();
+    this.db.prepare(
+      `update workflow_assignments
+       set last_reminded_at = ?,
+           last_activity_at = ?,
+           intervention_count = coalesce(intervention_count, 0) + 1,
+           supervisor_state = 'stalled',
+           updated_at = ?
+       where id = ?`
+    ).run(timestamp, timestamp, timestamp, assignmentId);
+    if (messageId) {
+      this.db.prepare(
+        `update workflow_interventions
+         set dispatched_message_id = coalesce(dispatched_message_id, ?),
+             executed_at = coalesce(executed_at, ?),
+             validation_status = 'executed'
+         where assignment_id = ?
+           and action_type = 'remind'
+           and dispatched_message_id is null`
+      ).run(messageId, timestamp, assignmentId);
+    }
+    return this.getWorkflowAssignment(assignmentId);
+  }
+
+  acquireWorkflowSupervisorLease(runId, ownerId, leaseUntilIso, now = nowIso()) {
+    const current = this.db.prepare("select * from workflow_supervisor_leases where run_id = ?").get(runId);
+    if (current && current.owner_id !== ownerId && String(current.lease_until) > String(now)) {
+      return null;
+    }
+    this.db.prepare(
+      `insert into workflow_supervisor_leases (run_id, owner_id, lease_until, updated_at)
+       values (?, ?, ?, ?)
+       on conflict(run_id) do update set
+         owner_id = excluded.owner_id,
+         lease_until = excluded.lease_until,
+         updated_at = excluded.updated_at`
+    ).run(runId, ownerId, leaseUntilIso, now);
+    return this.getWorkflowSupervisorLease(runId);
+  }
+
+  getWorkflowSupervisorLease(runId) {
+    const row = this.db.prepare("select * from workflow_supervisor_leases where run_id = ?").get(runId);
+    return row ? mapWorkflowSupervisorLeaseRow(row) : null;
   }
 
   migrate() {
@@ -778,6 +1023,44 @@ export class SessionStore {
         unique (run_id, event_key)
       );
 
+      create table if not exists workflow_observations (
+        id text primary key,
+        run_id text not null references workflow_runs(id) on delete cascade,
+        room_id text not null references rooms(id) on delete cascade,
+        tick_id text not null,
+        snapshot_json text not null,
+        detected_issues_json text not null,
+        created_at text not null
+      );
+
+      create table if not exists workflow_interventions (
+        id text primary key,
+        run_id text not null references workflow_runs(id) on delete cascade,
+        room_id text not null references rooms(id) on delete cascade,
+        observation_id text references workflow_observations(id) on delete set null,
+        source text not null,
+        action_type text not null,
+        target_session_id text,
+        target_role text,
+        assignment_id text,
+        work_item_id text,
+        reason text,
+        instruction text,
+        decision_json text not null,
+        validation_status text not null,
+        validation_error text,
+        dispatched_message_id text,
+        created_at text not null,
+        executed_at text
+      );
+
+      create table if not exists workflow_supervisor_leases (
+        run_id text primary key references workflow_runs(id) on delete cascade,
+        owner_id text not null,
+        lease_until text not null,
+        updated_at text not null
+      );
+
       create index if not exists idx_output_snapshots_session_id_id
         on output_snapshots(session_id, id desc);
 
@@ -795,11 +1078,28 @@ export class SessionStore {
 
       create index if not exists idx_room_message_deliveries_message_id
         on room_message_deliveries(message_id);
+
+      create index if not exists idx_workflow_runs_status_updated
+        on workflow_runs(status, updated_at);
+
+      create index if not exists idx_workflow_observations_run_created
+        on workflow_observations(run_id, created_at desc);
+
+      create index if not exists idx_workflow_interventions_run_created
+        on workflow_interventions(run_id, created_at desc);
+
+      create index if not exists idx_workflow_interventions_assignment_action_created
+        on workflow_interventions(assignment_id, action_type, created_at desc);
     `);
     this.ensureColumn("room_sessions", "role_preset_id", "text references role_presets(id) on delete set null");
     this.ensureColumn("room_sessions", "role_prompt", "text");
     this.ensureColumn("workflow_assignments", "dispatched_message_id", "text");
     this.ensureColumn("workflow_assignments", "result_message_id", "text");
+    this.ensureColumn("workflow_assignments", "last_activity_at", "text");
+    this.ensureColumn("workflow_assignments", "last_reminded_at", "text");
+    this.ensureColumn("workflow_assignments", "intervention_count", "integer not null default 0");
+    this.ensureColumn("workflow_assignments", "timeout_at", "text");
+    this.ensureColumn("workflow_assignments", "supervisor_state", "text not null default 'normal'");
     this.ensureColumn("workflow_runs", "template_id", "text");
     this.ensureColumn("workflow_runs", "template_name", "text");
     this.ensureColumn("workflow_runs", "template_json", "text");
@@ -1029,7 +1329,56 @@ function mapWorkflowAssignmentRow(row) {
     resultMessageId: row.result_message_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    finishedAt: row.finished_at
+    finishedAt: row.finished_at,
+    lastActivityAt: row.last_activity_at,
+    lastRemindedAt: row.last_reminded_at,
+    interventionCount: Number(row.intervention_count || 0),
+    timeoutAt: row.timeout_at,
+    supervisorState: row.supervisor_state || "normal"
+  };
+}
+
+function mapWorkflowObservationRow(row) {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    roomId: row.room_id,
+    tickId: row.tick_id,
+    snapshot: JSON.parse(row.snapshot_json || "{}"),
+    detectedIssues: JSON.parse(row.detected_issues_json || "[]"),
+    createdAt: row.created_at
+  };
+}
+
+function mapWorkflowInterventionRow(row) {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    roomId: row.room_id,
+    observationId: row.observation_id,
+    source: row.source,
+    actionType: row.action_type,
+    targetSessionId: row.target_session_id,
+    targetRole: row.target_role,
+    assignmentId: row.assignment_id,
+    workItemId: row.work_item_id,
+    reason: row.reason,
+    instruction: row.instruction,
+    decision: JSON.parse(row.decision_json || "{}"),
+    validationStatus: row.validation_status,
+    validationError: row.validation_error,
+    dispatchedMessageId: row.dispatched_message_id,
+    createdAt: row.created_at,
+    executedAt: row.executed_at
+  };
+}
+
+function mapWorkflowSupervisorLeaseRow(row) {
+  return {
+    runId: row.run_id,
+    ownerId: row.owner_id,
+    leaseUntil: row.lease_until,
+    updatedAt: row.updated_at
   };
 }
 

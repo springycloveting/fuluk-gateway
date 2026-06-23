@@ -4,8 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
-import { handleSessionGatewayRequest } from "../src/server.mjs";
+import { dispatchPendingWorkflowAssignments, handleSessionGatewayRequest, reconcileWorkflowResults } from "../src/server.mjs";
 import { SessionStore } from "../src/store.mjs";
+import { createWorkflowSupervisor } from "../src/workflow_supervisor.mjs";
 
 test("/api/nl output uses currentSessionId and returns JSON output", async () => {
   const session = {
@@ -216,6 +217,237 @@ test("/api/nl output can target a session by list position", async () => {
   });
   assert.deepEqual(captures, [{ sessionId: "session-3", lines: 50 }]);
   assert.deepEqual(saved, [{ sessionId: "session-3", lines: 50, text: "third output" }]);
+});
+
+test("/api/sessions output raw mode preserves terminal escapes", async () => {
+  const session = {
+    id: "session-1",
+    name: "opencode",
+    kind: "opencode",
+    status: "running",
+    cwd: "/workspace/app",
+    tmuxSessionName: "session-1"
+  };
+  const captures = [];
+  const saved = [];
+  const store = {
+    findByIdOrName(value) {
+      return value === session.id || value === session.name ? session : null;
+    },
+    saveOutput(sessionId, lines, text) {
+      saved.push({ sessionId, lines, text });
+    }
+  };
+  const tmux = {
+    async capture(record, lines, options) {
+      captures.push({ sessionId: record.id, lines, options });
+      return "\u001b[32mModel menu\u001b[0m";
+    }
+  };
+
+  const { statusCode, body } = await getJson("/api/sessions/session-1/output?lines=300&format=json&raw=1", {
+    config: {
+      authToken: "secret",
+      allowRuntimeMode: true,
+      runtimeSettings: {},
+      runtimeSettingsEnabled: false
+    },
+    store,
+    tmux
+  });
+
+  assert.equal(statusCode, 200);
+  const parsed = JSON.parse(body);
+  assert.equal(parsed.changed, true);
+  assert.equal(parsed.output, "\u001b[32mModel menu\u001b[0m");
+  assert.equal(typeof parsed.etag, "string");
+  assert.deepEqual(captures, [
+    {
+      sessionId: "session-1",
+      lines: 300,
+      options: { preserveEscapes: true, alternateScreen: true, offset: 0 }
+    }
+  ]);
+  assert.deepEqual(saved, [{ sessionId: "session-1", lines: 300, text: "\u001b[32mModel menu\u001b[0m" }]);
+});
+
+test("/api/sessions output forwards capture offset", async () => {
+  const session = {
+    id: "session-1",
+    name: "opencode",
+    kind: "opencode",
+    status: "running",
+    cwd: "/workspace/app",
+    tmuxSessionName: "session-1"
+  };
+  const captures = [];
+  const saved = [];
+  const store = {
+    findByIdOrName(value) {
+      return value === session.id || value === session.name ? session : null;
+    },
+    saveOutput(sessionId, lines, text) {
+      saved.push({ sessionId, lines, text });
+    }
+  };
+  const tmux = {
+    async capture(record, lines, options) {
+      captures.push({ sessionId: record.id, lines, options });
+      return "history window";
+    }
+  };
+
+  const { statusCode, body } = await getJson("/api/sessions/session-1/output?lines=80&offset=40&format=json&raw=1", {
+    config: {
+      authToken: "secret",
+      allowRuntimeMode: true,
+      runtimeSettings: {},
+      runtimeSettingsEnabled: false
+    },
+    store,
+    tmux
+  });
+
+  assert.equal(statusCode, 200);
+  const parsed = JSON.parse(body);
+  assert.equal(parsed.changed, true);
+  assert.equal(parsed.output, "history window");
+  assert.equal(typeof parsed.etag, "string");
+  assert.deepEqual(captures, [
+    {
+      sessionId: "session-1",
+      lines: 80,
+      options: { preserveEscapes: true, alternateScreen: true, offset: 40 }
+    }
+  ]);
+  assert.deepEqual(saved, []);
+});
+
+test("UI polling endpoints do not exhaust the default API rate limit", async () => {
+  const session = {
+    id: "session-1",
+    name: "opencode",
+    kind: "opencode",
+    status: "running",
+    cwd: "/workspace/app",
+    tmuxSessionName: "session-1"
+  };
+  const store = {
+    findByIdOrName(value) {
+      return value === session.id || value === session.name ? session : null;
+    },
+    saveOutput() {}
+  };
+  const tmux = {
+    async capture() {
+      return "current output";
+    }
+  };
+  const context = {
+    config: {
+      authToken: "secret",
+      allowRuntimeMode: true,
+      runtimeSettings: {},
+      runtimeSettingsEnabled: false
+    },
+    store,
+    tmux
+  };
+
+  let lastResponse = null;
+  for (let index = 0; index < 110; index += 1) {
+    lastResponse = await getJson("/api/sessions/session-1/output?lines=20&format=json", context);
+  }
+
+  assert.equal(lastResponse.statusCode, 200);
+});
+
+test("/api/sessions/:id/keys allows tmux mouse wheel keys", async () => {
+  const session = {
+    id: "session-1",
+    name: "opencode",
+    kind: "opencode",
+    status: "running",
+    cwd: "/workspace/app",
+    tmuxSessionName: "session-1"
+  };
+  const sent = [];
+  const store = {
+    findByIdOrName(value) {
+      return value === session.id || value === session.name ? session : null;
+    },
+    touch() {}
+  };
+  const tmux = {
+    async sendKeys(record, keys) {
+      sent.push({ sessionId: record.id, keys });
+    }
+  };
+
+  const { statusCode, body } = await postJson(
+    "/api/sessions/session-1/keys",
+    { keys: ["WheelUpPane", "WheelDownPane"] },
+    {
+      config: {
+        authToken: "secret",
+        allowRuntimeMode: true,
+        runtimeSettings: {},
+        runtimeSettingsEnabled: false
+      },
+      store,
+      tmux
+    }
+  );
+
+  assert.equal(statusCode, 200);
+  assert.deepEqual(JSON.parse(body), { ok: true });
+  assert.deepEqual(sent, [{ sessionId: "session-1", keys: ["WheelUpPane", "WheelDownPane"] }]);
+});
+
+test("/api/sessions/:id/keys normalizes browser page keys to tmux keys", async () => {
+  const session = {
+    id: "session-1",
+    name: "opencode",
+    kind: "opencode",
+    status: "running",
+    cwd: "/workspace/app",
+    tmuxSessionName: "session-1"
+  };
+  const sent = [];
+  const touched = [];
+  const store = {
+    findByIdOrName(value) {
+      return value === session.id || value === session.name ? session : null;
+    },
+    touch(sessionId) {
+      touched.push(sessionId);
+    }
+  };
+  const tmux = {
+    async sendKeys(record, keys) {
+      sent.push({ sessionId: record.id, keys });
+    }
+  };
+
+  const { statusCode, body } = await postJson(
+    "/api/sessions/session-1/keys",
+    { keys: ["PageUp", "PageDown", "Enter"] },
+    {
+      config: {
+        authToken: "secret",
+        allowRuntimeMode: true,
+        runtimeSettings: {},
+        runtimeSettingsEnabled: false
+      },
+      store,
+      tmux
+    }
+  );
+
+  assert.equal(statusCode, 200);
+  assert.deepEqual(JSON.parse(body), { ok: true });
+  assert.deepEqual(sent, [{ sessionId: "session-1", keys: ["PPage", "NPage", "Enter"] }]);
+  assert.deepEqual(touched, ["session-1"]);
 });
 
 test("/api/sessions/:id/resize resizes only the selected session", async () => {
@@ -1409,6 +1641,135 @@ test("planner room result advances the workflow and dispatches coder assignments
     [coder1.id, coder2.id].sort()
   );
   assert.match(sent[1].text, /T1 -> coder1; T2 -> coder2/);
+  store.close();
+});
+
+test("workflow supervisor API reports status and can run a manual tick", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-supervisor-api-"));
+  const store = new SessionStore(path.join(dir, "test.sqlite"));
+  const planner = store.create({ kind: "runtime", cwd: dir, name: "planner" }, "/bin/bash", []);
+  const room = store.createRoom({ name: "supervisor-api-room" });
+  store.assignSessionToRoom(room.id, planner.id, "planner");
+  const workflow = store.startWorkflowRun(
+    store.createWorkflowRun({ roomId: room.id, objective: "Ship supervisor API" }).id,
+    { eventKey: "supervisor-api:start" }
+  );
+  const sent = [];
+  const context = {
+    config: { authToken: "secret", submitKeyDelayMs: 0 },
+    store,
+    tmux: {
+      async send(session, text) {
+        sent.push({ sessionId: session.id, text });
+      }
+    }
+  };
+  context.workflowSupervisor = createWorkflowSupervisor(
+    context,
+    { reconcileWorkflowResults, dispatchPendingWorkflowAssignments },
+    {
+      enabled: false,
+      ownerId: "api-test-supervisor",
+      stallMs: 0,
+      hardTimeoutMs: 3_600_000
+    }
+  );
+
+  let response = await requestJson("GET", `/api/workflows/${workflow.id}/supervisor`, {}, context);
+  assert.equal(response.statusCode, 200);
+  assert.equal(JSON.parse(response.body).supervisor.enabled, false);
+
+  response = await postJson(`/api/workflows/${workflow.id}/supervisor/tick`, {}, context);
+  assert.equal(response.statusCode, 200);
+  assert.equal(JSON.parse(response.body).result.detectedIssues.length, 1);
+  assert.equal(sent.length, 2);
+
+  response = await requestJson("GET", `/api/workflows/${workflow.id}/supervisor`, {}, context);
+  assert.equal(response.statusCode, 200);
+  const status = JSON.parse(response.body).supervisor;
+  assert.equal(status.observations.length, 1);
+  assert.equal(status.interventions.length, 1);
+
+  response = await requestJson("GET", `/api/workflows/${workflow.id}/interventions?limit=10`, {}, context);
+  assert.equal(response.statusCode, 200);
+  const interventions = JSON.parse(response.body).interventions;
+  assert.equal(interventions.length, 1);
+  assert.equal(interventions[0].runId, workflow.id);
+  store.close();
+});
+
+test("workflow supervisor API saves policy settings and applies them immediately", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-supervisor-policy-api-"));
+  const settingsPath = path.join(dir, "settings.json");
+  const store = new SessionStore(path.join(dir, "test.sqlite"));
+  const room = store.createRoom({ name: "supervisor-policy-room" });
+  const workflow = store.createWorkflowRun({ roomId: room.id, objective: "Tune supervisor policy" });
+  const context = {
+    config: {
+      authToken: "secret",
+      settingsPath,
+      runtimeSettings: {},
+      runtimeSettingsEnabled: false,
+      workflowSupervisorPmEnabled: false
+    },
+    store
+  };
+  context.workflowSupervisor = createWorkflowSupervisor(context, {}, { enabled: false, stallMs: 900_000 });
+
+  const response = await requestJson(
+    "PUT",
+    `/api/workflows/${workflow.id}/supervisor`,
+    {
+      pmAgentEnabled: true,
+      stallMs: 120_000,
+      sameActionCooldownMs: 30_000,
+      maxInterventionsPerAssignment: 2,
+      maxSpawnedAgentsPerRoom: 1
+    },
+    context
+  );
+
+  assert.equal(response.statusCode, 200);
+  const payload = JSON.parse(response.body);
+  assert.equal(payload.supervisor.options.pmAgentEnabled, true);
+  assert.equal(payload.supervisor.options.stallMs, 120_000);
+  assert.equal(payload.supervisor.options.sameActionCooldownMs, 30_000);
+  assert.equal(payload.supervisor.options.maxInterventionsPerAssignment, 2);
+  assert.equal(payload.supervisor.options.maxSpawnedAgentsPerRoom, 1);
+  assert.equal(context.workflowSupervisor.options.stallMs, 120_000);
+  assert.equal(JSON.parse(fs.readFileSync(settingsPath, "utf8")).workflowSupervisor.stallMs, 120_000);
+  store.close();
+});
+
+test("/api/workflows/:id deletes a workflow run", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-workflow-delete-api-"));
+  const store = new SessionStore(path.join(dir, "test.sqlite"));
+  const planner = store.create({ kind: "runtime", cwd: dir, name: "planner" }, "/bin/bash", []);
+  const room = store.createRoom({ name: "workflow-delete-api-room" });
+  store.assignSessionToRoom(room.id, planner.id, "planner");
+  const workflow = store.startWorkflowRun(
+    store.createWorkflowRun({ roomId: room.id, objective: "Delete stuck run" }).id,
+    { eventKey: "delete-api:start" }
+  );
+  const events = [];
+  const context = {
+    config: { authToken: "secret", submitKeyDelayMs: 0 },
+    store,
+    tmux: { async send() {} },
+    eventHub: {
+      broadcast(event) {
+        events.push(event);
+      }
+    }
+  };
+
+  const response = await requestJson("DELETE", `/api/workflows/${workflow.id}`, {}, context);
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(JSON.parse(response.body), { ok: true, workflowId: workflow.id });
+  assert.equal(store.getWorkflowRun(workflow.id), null);
+  assert.deepEqual(store.listWorkflowRuns(room.id), []);
+  assert.deepEqual(events, [{ type: "workflow_deleted", workflowId: workflow.id, roomId: room.id }]);
   store.close();
 });
 

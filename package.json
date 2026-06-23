@@ -7,11 +7,12 @@
     "dev": "node src/server.mjs",
     "start": "node src/server.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check src/server.mjs && node --check src/store.mjs && node --check src/role_presets.mjs && node --check src/tmux.mjs && node --check src/nl.mjs && node --check src/ai_parser.mjs && node --check src/auth.mjs && node --check src/codeclip_recorder.mjs && node --check src/session_agent.mjs"
+    "check": "node --check src/server.mjs && node --check src/store.mjs && node --check src/workflow_supervisor.mjs && node --check src/project_manager_agent.mjs && node --check src/role_presets.mjs && node --check src/tmux.mjs && node --check src/nl.mjs && node --check src/ai_parser.mjs && node --check src/auth.mjs && node --check src/codeclip_recorder.mjs && node --check src/session_agent.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "^0.75.5",
     "@earendil-works/pi-ai": "^0.75.5",
+    "@openai/codex": "^0.141.0",
     "typebox": "^1.1.38"
   }
 }

@@ -8,10 +8,12 @@ import { loadConfig, updateRuntimeSettings } from "./config.mjs";
 import { CodeClipSessionRecorder } from "./codeclip_recorder.mjs";
 import { isAuthorizedHeader } from "./auth.mjs";
 import { parseNaturalCommand } from "./nl.mjs";
+import { createProjectManagerAgent } from "./project_manager_agent.mjs";
 import { createSessionAgentManager } from "./session_agent.mjs";
 import { SessionStore } from "./store.mjs";
 import { TmuxBackend } from "./tmux.mjs";
 import { newId, normalizeLines, outputEtag, readJsonBody, sanitizeTmuxName } from "./utils.mjs";
+import { createWorkflowSupervisor } from "./workflow_supervisor.mjs";
 import {
   assignmentChainRoot,
   latestChainAssignment,
@@ -40,7 +42,8 @@ const SECURITY_HEADERS = {
 
 // Rate limiting configuration
 const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
-const RATE_LIMIT_MAX_REQUESTS = 100;
+const RATE_LIMIT_MAX_REQUESTS = 300;
+const RATE_LIMIT_UI_POLL_MAX_REQUESTS = 1_200;
 const rateLimitStore = new Map();
 
 export function createSessionGatewayServer(options = {}) {
@@ -55,6 +58,31 @@ export function createSessionGatewayServer(options = {}) {
   const context = { config, store, tmux, sessionRecorder, publicDir: staticDir, eventHub, sessionTaskStates };
   context.sessionAgentManager =
     options.sessionAgentManager ?? createSessionAgentManager(context, createSessionAgentOperations(context));
+  context.projectManagerAgent = options.projectManagerAgent ?? createProjectManagerAgent(context);
+  if (options.workflowSupervisor !== false) {
+    context.workflowSupervisor =
+      options.workflowSupervisor ??
+      createWorkflowSupervisor(
+        context,
+        {
+          reconcileWorkflowResults,
+          dispatchPendingWorkflowAssignments,
+          dispatchRoomMessage,
+          spawnWorkflowAgent,
+          projectManagerAgent: context.projectManagerAgent
+        },
+        {
+          enabled: config.workflowSupervisorEnabled,
+          pmAgentEnabled: config.workflowSupervisorPmEnabled,
+          intervalMs: config.workflowSupervisorIntervalMs,
+          stallMs: config.workflowSupervisorStallMs,
+          hardTimeoutMs: config.workflowSupervisorHardTimeoutMs,
+          sameActionCooldownMs: config.workflowSupervisorCooldownMs,
+          maxInterventionsPerAssignment: config.workflowSupervisorMaxInterventions,
+          maxSpawnedAgentsPerRoom: config.workflowSupervisorMaxSpawnedAgents
+        }
+      );
+  }
   let notificationPollTimer = null;
   const pollNotifications = async () => {
     try {
@@ -78,8 +106,14 @@ export function createSessionGatewayServer(options = {}) {
   eventHub.onClientChange = scheduleNotificationPoll;
   const server = http.createServer((req, res) => handleRequest(req, res, context));
   server.on("upgrade", (req, socket, head) => handleWebSocketUpgrade(req, socket, head, context));
-  server.on("listening", scheduleNotificationPoll);
-  server.on("close", () => clearTimeout(notificationPollTimer));
+  server.on("listening", () => {
+    scheduleNotificationPoll();
+    context.workflowSupervisor?.start?.();
+  });
+  server.on("close", () => {
+    clearTimeout(notificationPollTimer);
+    context.workflowSupervisor?.stop?.();
+  });
   return server;
 }
 
@@ -89,14 +123,16 @@ export async function handleSessionGatewayRequest(req, res, context) {
 
 async function handleRequest(req, res, context) {
   try {
-    // Apply rate limiting
-    const clientIp = getClientIp(req);
-    if (!checkRateLimit(clientIp)) {
-      sendJson(res, 429, { error: "Too many requests. Please try again later." });
-      return;
-    }
-
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+
+    if (url.pathname.startsWith("/api/")) {
+      const clientIp = getClientIp(req);
+      const budget = rateLimitBudget(url, req.method ?? "GET");
+      if (!checkRateLimit(`${clientIp}:${budget.bucket}`, budget.maxRequests)) {
+        sendJson(res, 429, { error: "Too many requests. Please try again later." });
+        return;
+      }
+    }
 
     if (url.pathname === "/health") {
       await handleHealth(res, context);
@@ -190,6 +226,8 @@ async function handleApi(req, res, url, context) {
     const body = await readJsonBody(req);
     const settings = updateRuntimeSettings(config, { ...config.runtimeSettings, ...(body.settings ?? body) });
     context.sessionAgentManager?.reset?.();
+    applyWorkflowSupervisorSettings(context, settings.workflowSupervisor);
+    context.projectManagerAgent?.reset?.();
     sendJson(res, 200, { settings });
     return;
   }
@@ -226,7 +264,7 @@ async function handleApi(req, res, url, context) {
     return;
   }
 
-  const workflowRoute = pathname.match(/^\/api\/workflows\/([^/]+)(?:\/([^/]+))?$/);
+  const workflowRoute = pathname.match(/^\/api\/workflows\/([^/]+)(?:\/(.+))?$/);
   if (workflowRoute) {
     const runId = decodeURIComponent(workflowRoute[1]);
     const action = workflowRoute[2] ?? "";
@@ -234,6 +272,14 @@ async function handleApi(req, res, url, context) {
       const workflow = store.getWorkflowRun(runId);
       if (!workflow) throw new Error(`Workflow run not found: ${runId}`);
       sendJson(res, 200, { workflow });
+      return;
+    }
+    if (method === "DELETE" && action === "") {
+      const workflow = store.getWorkflowRun(runId);
+      if (!workflow) throw new Error(`Workflow run not found: ${runId}`);
+      store.deleteWorkflowRun(workflow.id);
+      context.eventHub?.broadcast({ type: "workflow_deleted", workflowId: workflow.id, roomId: workflow.roomId });
+      sendJson(res, 200, { ok: true, workflowId: workflow.id });
       return;
     }
     if (method === "POST" && action === "start") {
@@ -250,6 +296,38 @@ async function handleApi(req, res, url, context) {
       sendJson(res, 200, { workflow: store.getWorkflowRun(runId) });
       return;
     }
+    if (action === "supervisor") {
+      if (method === "GET") {
+        sendJson(res, 200, { supervisor: workflowSupervisorStatus(runId, context) });
+        return;
+      }
+      if (method === "PUT") {
+        const workflow = store.getWorkflowRun(runId);
+        if (!workflow) throw new Error(`Workflow run not found: ${runId}`);
+        const body = await readJsonBody(req);
+        const current = config.runtimeSettings ?? {};
+        const workflowSupervisor = { ...(current.workflowSupervisor ?? {}), ...(body.supervisor ?? body) };
+        const settings = updateRuntimeSettings(config, { ...current, workflowSupervisor });
+        applyWorkflowSupervisorSettings(context, settings.workflowSupervisor);
+        context.projectManagerAgent?.reset?.();
+        sendJson(res, 200, { supervisor: workflowSupervisorStatus(runId, context), settings });
+        return;
+      }
+    }
+    if (action === "supervisor/tick") {
+      if (method === "POST") {
+        if (!context.workflowSupervisor?.tickWorkflow) throw new Error("Workflow supervisor is not configured");
+        sendJson(res, 200, { result: await context.workflowSupervisor.tickWorkflow(runId) });
+        return;
+      }
+    }
+    if (method === "GET" && action === "interventions") {
+      const workflow = store.getWorkflowRun(runId);
+      if (!workflow) throw new Error(`Workflow run not found: ${runId}`);
+      const limit = Math.min(200, Math.max(1, parseInt(url.searchParams.get("limit") || "50", 10) || 50));
+      sendJson(res, 200, { interventions: store.listWorkflowInterventions(runId, limit) });
+      return;
+    }
   }
 
   const sessionRoute = pathname.match(/^\/api\/sessions\/([^/]+)(?:\/([^/]+))?$/);
@@ -261,6 +339,67 @@ async function handleApi(req, res, url, context) {
   }
 
   sendJson(res, 404, { error: "Not found" });
+}
+
+function workflowSupervisorStatus(runId, context) {
+  if (context.workflowSupervisor?.status) return context.workflowSupervisor.status(runId);
+  const workflow = context.store.getWorkflowRun(runId);
+  if (!workflow) throw new Error(`Workflow run not found: ${runId}`);
+  return {
+    enabled: false,
+    lease: context.store.getWorkflowSupervisorLease?.(runId) ?? null,
+    observations: context.store.listWorkflowObservations?.(runId, 5) ?? [],
+    interventions: context.store.listWorkflowInterventions?.(runId, 20) ?? []
+  };
+}
+
+function applyWorkflowSupervisorSettings(context, settings = {}) {
+  if (!context.workflowSupervisor?.options) return;
+  const options = context.workflowSupervisor.options;
+  const numericKeys = [
+    "intervalMs",
+    "stallMs",
+    "hardTimeoutMs",
+    "sameActionCooldownMs",
+    "maxInterventionsPerAssignment",
+    "maxSpawnedAgentsPerRoom"
+  ];
+  options.pmAgentEnabled = Boolean(settings?.pmAgentEnabled);
+  for (const key of numericKeys) {
+    if (typeof settings?.[key] === "number" && Number.isFinite(settings[key]) && settings[key] >= 0) {
+      options[key] = settings[key];
+    }
+  }
+}
+
+function requireWorkflowRunId(params = {}) {
+  const runId = typeof params.runId === "string" && params.runId.trim() ? params.runId.trim() : null;
+  if (!runId) throw new Error("runId is required");
+  return runId;
+}
+
+function requireWorkflowRun(runId, context) {
+  const workflow = context.store.getWorkflowRun(runId);
+  if (!workflow) throw new Error(`Workflow run not found: ${runId}`);
+  return workflow;
+}
+
+function pickWorkflowSupervisorSettings(input = {}) {
+  const output = {};
+  if (typeof input.pmAgentEnabled === "boolean") output.pmAgentEnabled = input.pmAgentEnabled;
+  for (const key of [
+    "intervalMs",
+    "stallMs",
+    "hardTimeoutMs",
+    "sameActionCooldownMs",
+    "maxInterventionsPerAssignment",
+    "maxSpawnedAgentsPerRoom"
+  ]) {
+    if (typeof input[key] === "number" && Number.isFinite(input[key]) && input[key] >= 0) {
+      output[key] = input[key];
+    }
+  }
+  return output;
 }
 
 async function handleRoomAction(req, res, method, roomId, action, context) {
@@ -361,7 +500,7 @@ async function dispatchPendingPlannerAssignments(workflow, context) {
   }
 }
 
-async function reconcileWorkflowResults(runId, context) {
+export async function reconcileWorkflowResults(runId, context) {
   const workflow = context.store.getWorkflowRun(runId);
   if (!workflow) throw new Error(`Workflow run not found: ${runId}`);
   const messages = context.store.listRoomMessages(workflow.roomId, 500);
@@ -381,6 +520,7 @@ async function advanceWorkflowFromResult(message, context) {
   const workflow = context.store.getWorkflowRun(runId);
   if (!assignment || !workflow || workflow.roomId !== message.roomId) return;
   if (assignment.sessionId !== message.fromSessionId) throw new Error("Workflow result sender does not match assignment");
+  if (assignment.status !== "pending") return;
   if (assignment.resultMessageId) return;
 
   const outcome = workflowResultOutcome(message.text);
@@ -567,10 +707,12 @@ function workflowReadyForIntegration(workflow) {
   });
 }
 
-async function dispatchPendingWorkflowAssignments(workflow, context, details = {}) {
+export async function dispatchPendingWorkflowAssignments(workflow, context, details = {}) {
   if (!workflow) return;
   const plannerResult = details.plannerResult || workflowPlannerResult(workflow, context.store);
+  const assignmentIds = Array.isArray(details.assignmentIds) ? new Set(details.assignmentIds) : null;
   for (const assignment of workflow.runAssignments ?? []) {
+    if (assignmentIds && !assignmentIds.has(assignment.id)) continue;
     if (assignment.status !== "pending" || (assignment.dispatchedMessageId && !details.redispatch)) continue;
     const text = workflowAssignmentText(workflow, assignment, plannerResult, context.store, details.redispatch);
     const result = await dispatchRoomMessage(workflow.roomId, {
@@ -615,7 +757,7 @@ function workflowAssignmentText(workflow, assignment, plannerResult, store, redi
     })}\n\n完成后必须通过房间回调返回 [DONE]；失败返回 [FAIL]，阻塞返回 [BLOCKED]。${retry}`;
   }
   if (assignment.gateKind === "planning") {
-    return `你是该项目工作流的 Planner。请分析目标，拆解为可执行任务，明确依赖关系、验收标准，并将任务合理分配给房间中的 coder。完成后把结构化计划发送回项目房间。\n\n工作流目标：\n${workflow.objective}${retry}`;
+    return `${reminder}你是该项目工作流的 Planner。请分析目标，拆解为可执行任务，明确依赖关系、验收标准，并将任务合理分配给房间中的 coder。完成后把结构化计划发送回项目房间。\n\n工作流目标：\n${workflow.objective}${retry}`;
   }
   if (assignment.gateKind === "development") {
     const tasks = plannerTasksForSession(plannerResult, assignee?.sessionName);
@@ -627,7 +769,7 @@ function workflowAssignmentText(workflow, assignment, plannerResult, store, redi
     const tasks = plannerTasksForSession(plannerResult, coderSession?.sessionName);
     return `${reminder}你是 ${assignee?.sessionName || "tester"}，只测试 ${coderSession?.sessionName || "对应 Coder"} 的下列任务。不要测试其他 coder 的任务。通过回传 [DONE]，不通过回传 [FAIL] 并列出可复现证据。\n\n工作流目标：\n${workflow.objective}\n\n待测任务：\n${tasks}\n\n${coderSession?.sessionName || "Coder"} 结果：\n${priorResult || "请检查当前工作区实现。"}`;
   }
-  return `你是 testerall。所有分项开发和测试已完成，请执行完整功能、端到端和回归测试。通过回传 [DONE]，失败回传 [FAIL] 并提供证据。\n\n工作流目标：\n${workflow.objective}\n\nPlanner 计划：\n${plannerResult}${retry}`;
+  return `${reminder}你是 testerall。所有分项开发和测试已完成，请执行完整功能、端到端和回归测试。通过回传 [DONE]，失败回传 [FAIL] 并提供证据。\n\n工作流目标：\n${workflow.objective}\n\nPlanner 计划：\n${plannerResult}${retry}`;
 }
 
 function linearPreviousResults(workflow, assignment, store) {
@@ -677,7 +819,7 @@ async function postWorkflowRoomNotice(workflow, text, context) {
   }, context);
 }
 
-async function dispatchRoomMessage(roomId, body, context) {
+export async function dispatchRoomMessage(roomId, body, context) {
   const { store } = context;
   const room = store.getRoom(roomId);
   if (!room) throw new Error(`Room not found: ${roomId}`);
@@ -685,7 +827,27 @@ async function dispatchRoomMessage(roomId, body, context) {
   const fromSessionId = normalizeOptionalSessionId(body.fromSessionId);
   const roomOnly = target.mode === "room" || body.metadata?.source === "agent-result";
   const targets = roomOnly ? [] : resolveRoomMessageTargets(room, target, fromSessionId);
-  if (!roomOnly && !targets.length) throw new Error("No running room sessions match the message target");
+
+  // When no running sessions match and it's a workflow dispatch, return gracefully
+  // instead of throwing, so the supervisor can handle it
+  if (!roomOnly && !targets.length) {
+    const metadata = body.metadata || {};
+    if (metadata.source === "pm-intervention" || metadata.source === "workflow-system") {
+      console.warn(`dispatchRoomMessage: No running sessions for workflow dispatch to room ${roomId}`);
+      // Create the message but don't deliver it
+      const message = store.createRoomMessage({
+        roomId: room.id,
+        fromSessionId,
+        text: body.text,
+        targetMode: target.mode,
+        targetRole: target.role,
+        targetSessionIds: target.sessionIds,
+        metadata: { ...metadata, deliveryFailed: true, deliveryError: "No running sessions" }
+      });
+      return { message: store.getRoomMessage(message.id), deliveryFailed: true, deliveryError: "No running sessions" };
+    }
+    throw new Error("No running room sessions match the message target");
+  }
 
   const message = store.createRoomMessage({
     roomId: room.id,
@@ -828,15 +990,20 @@ async function handleSessionAction(req, res, url, method, idOrName, action, cont
 
   if (method === "GET" && action === "output") {
     const lines = normalizeLines(url.searchParams.get("lines"));
-    const text = await tmux.capture(session, lines);
-    const etag = outputEtag(text, lines);
+    const offset = normalizeOutputOffset(url.searchParams.get("offset"));
+    const raw = url.searchParams.get("raw") === "1";
+    const captureOptions = raw
+      ? { preserveEscapes: true, alternateScreen: true, offset }
+      : { offset };
+    const text = await tmux.capture(session, lines, captureOptions);
+    const etag = outputEtag(text, String(lines) + ":" + String(offset));
     if (url.searchParams.get("format") === "json") {
       const changed = url.searchParams.get("etag") !== etag;
-      if (changed) store.saveOutput(session.id, lines, text);
+      if (changed && offset === 0) store.saveOutput(session.id, lines, text);
       sendJson(res, 200, changed ? { changed, etag, output: text } : { changed, etag });
       return;
     }
-    store.saveOutput(session.id, lines, text);
+    if (offset === 0) store.saveOutput(session.id, lines, text);
     sendText(res, 200, text);
     return;
   }
@@ -901,11 +1068,17 @@ async function handleSessionAction(req, res, url, method, idOrName, action, cont
   sendJson(res, 404, { error: "Not found" });
 }
 
+function normalizeOutputOffset(value) {
+  const parsed = typeof value === "string" ? Number.parseInt(value, 10) : Number(value);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.min(Math.max(parsed, 0), 5000);
+}
+
 function parseTmuxKeys(value) {
   if (!Array.isArray(value) || !value.length) throw new Error("keys are required");
   return value.map((key) => {
     if (typeof key !== "string" || !key.trim()) throw new Error("keys must be non-empty strings");
-    const normalized = key.trim();
+    const normalized = normalizeTmuxKey(key.trim());
     if (!isAllowedTmuxKey(normalized)) throw new Error(`tmux key is not allowed: ${normalized}`);
     return normalized;
   });
@@ -919,11 +1092,17 @@ function parseTmuxSize(value) {
   return { cols, rows };
 }
 
+function normalizeTmuxKey(key) {
+  if (key === "PageUp") return "PPage";
+  if (key === "PageDown") return "NPage";
+  return key;
+}
+
 function isAllowedTmuxKey(key) {
   return (
     /^[A-Za-z0-9]$/.test(key) ||
     /^C-[A-Za-z]$/.test(key) ||
-    /^(Enter|Escape|Space|Tab|BTab|Up|Down|Left|Right|BSpace|DC|Home|End|PageUp|PageDown)$/.test(key)
+    /^(Enter|Escape|Space|Tab|BTab|Up|Down|Left|Right|BSpace|DC|Home|End|PPage|NPage|WheelUpPane|WheelDownPane)$/.test(key)
   );
 }
 
@@ -1203,6 +1382,181 @@ function createSessionAgentOperations(context) {
       const limit = typeof params.limit === "number" ? Math.min(500, Math.max(1, params.limit)) : 100;
       const messages = context.store.listRoomMessages(room.id, limit);
       return { room, messages };
+    },
+    async list_workflow_templates() {
+      const templates = context.store.listWorkflowTemplates();
+      return { templates };
+    },
+    async list_workflows(params = {}) {
+      const roomIdOrName = params.roomId ?? params.roomName;
+      if (typeof roomIdOrName === "string" && roomIdOrName.trim()) {
+        const room = context.store.getRoom(roomIdOrName.trim());
+        if (!room) throw new Error(`Room not found: ${roomIdOrName}`);
+        return { room, workflows: context.store.listWorkflowRuns(room.id) };
+      }
+      if (params.activeOnly !== false && typeof context.store.listActiveWorkflowRuns === "function") {
+        return { workflows: context.store.listActiveWorkflowRuns() };
+      }
+      const workflows = context.store.listRooms().flatMap((room) => context.store.listWorkflowRuns(room.id));
+      return { workflows };
+    },
+    async create_workflow_run(params = {}) {
+      const roomIdOrName = params.roomId ?? params.roomName;
+      if (!roomIdOrName || typeof roomIdOrName !== "string" || !roomIdOrName.trim()) {
+        throw new Error("roomId is required");
+      }
+      if (typeof params.objective !== "string" || !params.objective.trim()) {
+        throw new Error("objective is required");
+      }
+      const room = context.store.getRoom(roomIdOrName.trim());
+      if (!room) throw new Error(`Room not found: ${roomIdOrName}`);
+      const workflow = context.store.createWorkflowRun({
+        roomId: room.id,
+        objective: params.objective.trim(),
+        templateId: params.templateId ?? null
+      });
+      return { workflow, room: context.store.getRoom(room.id) };
+    },
+    async start_workflow_run(params = {}) {
+      const runIdOrName = params.runId ?? params.runName;
+      if (!runIdOrName || typeof runIdOrName !== "string" || !runIdOrName.trim()) {
+        throw new Error("runId is required");
+      }
+      const workflow = context.store.getWorkflowRun(runIdOrName.trim());
+      if (!workflow) throw new Error(`Workflow run not found: ${runIdOrName}`);
+
+      const started = context.store.startWorkflowRun(workflow.id, params);
+      if (started.templateDefinition?.kind === "linear") {
+        await dispatchPendingWorkflowAssignments(started, context);
+      } else {
+        await dispatchPendingPlannerAssignments(started, context);
+      }
+      return { workflow: context.store.getWorkflowRun(workflow.id) };
+    },
+    async get_workflow_supervisor(params = {}) {
+      const runId = requireWorkflowRunId(params);
+      const workflow = requireWorkflowRun(runId, context);
+      return { workflow, supervisor: workflowSupervisorStatus(workflow.id, context) };
+    },
+    async tick_workflow_supervisor(params = {}) {
+      const runId = requireWorkflowRunId(params);
+      const workflow = requireWorkflowRun(runId, context);
+      if (!context.workflowSupervisor?.tickWorkflow) throw new Error("Workflow supervisor is not configured");
+      return { workflow, result: await context.workflowSupervisor.tickWorkflow(workflow.id) };
+    },
+    async update_workflow_supervisor_policy(params = {}) {
+      const runId = requireWorkflowRunId(params);
+      const workflow = requireWorkflowRun(runId, context);
+      const current = context.config.runtimeSettings ?? {};
+      const workflowSupervisor = {
+        ...(current.workflowSupervisor ?? {}),
+        ...pickWorkflowSupervisorSettings(params)
+      };
+      const settings = updateRuntimeSettings(context.config, { ...current, workflowSupervisor });
+      applyWorkflowSupervisorSettings(context, settings.workflowSupervisor);
+      context.projectManagerAgent?.reset?.();
+      return { workflow, supervisor: workflowSupervisorStatus(workflow.id, context), settings };
+    },
+    async setup_workflow_room(params = {}) {
+      const project = typeof params.project === "string" ? params.project.trim() : null;
+      const objective = typeof params.objective === "string" ? params.objective.trim() : null;
+      if (!objective) throw new Error("objective is required");
+
+      const roles = Array.isArray(params.roles) ? params.roles : [];
+      if (!roles.length) throw new Error("at least one role is required");
+
+      // Create or get room
+      let room;
+      const existingRoomId = params.roomId ?? params.roomName;
+      if (existingRoomId && typeof existingRoomId === "string" && existingRoomId.trim()) {
+        room = context.store.getRoom(existingRoomId.trim());
+        if (!room) throw new Error(`Room not found: ${existingRoomId}`);
+      } else {
+        const roomName = typeof params.roomName === "string" && params.roomName.trim()
+          ? params.roomName.trim()
+          : `项目-${objective.slice(0, 20)}`;
+        room = context.store.createRoom({ name: roomName, objective, project });
+      }
+
+      // Create sessions for each role and assign to room
+      const createdSessions = [];
+      const roleCount = {};
+      for (const roleSpec of roles) {
+        const role = typeof roleSpec.name === "string" ? roleSpec.name.trim() : null;
+        if (!role) continue;
+
+        const kind = roleSpec.kind || "claude";
+        if (!isSessionKind(kind)) {
+          console.warn(`Invalid session kind '${kind}' for role '${role}', skipping`);
+          continue;
+        }
+
+        roleCount[role] = (roleCount[role] || 0) + 1;
+        const projectName = project?.split("/").pop() || "project";
+        const sessionName = `${role}${roleCount[role]}-${projectName}`;
+
+        let deployment = null;
+        if (roleSpec.deploymentMode === "host") {
+          deployment = { mode: "host" };
+        } else if (roleSpec.deploymentMode === "docker") {
+          deployment = { mode: "docker", dockerName: roleSpec.dockerName };
+        }
+
+        const session = await createSession({
+          kind,
+          name: sessionName,
+          cwd: project,
+          project: projectName,
+          deployment,
+          commandArgs: []
+        }, context);
+
+        const membership = context.store.assignSessionToRoom(
+          room.id,
+          session.id,
+          role,
+          { rolePrompt: roleSpec.rolePrompt, rolePresetId: roleSpec.rolePresetId }
+        );
+
+        // Inject role prompt if requested
+        const shouldInject = roleSpec.injectRolePrompt !== false && membership?.rolePrompt;
+        if (shouldInject) {
+          if (session.kind !== "runtime") {
+            await new Promise((resolve) => setTimeout(resolve, context.config.cliStartupDelayMs));
+          }
+          const text = rolePromptMessage(membership);
+          await context.tmux.send(session, text);
+          saveInputIfSupported(context.store, session.id, text);
+          context.store.touch(session.id);
+        }
+
+        createdSessions.push({ session: context.store.findByIdOrName(session.id), membership, role });
+      }
+
+      // Create workflow
+      const workflow = context.store.createWorkflowRun({
+        roomId: room.id,
+        objective,
+        templateId: params.templateId ?? null
+      });
+
+      // Start workflow if autoStart
+      let startedWorkflow = null;
+      if (params.autoStart !== false) {
+        startedWorkflow = context.store.startWorkflowRun(workflow.id, params);
+        if (startedWorkflow.templateDefinition?.kind === "linear") {
+          await dispatchPendingWorkflowAssignments(startedWorkflow, context);
+        } else {
+          await dispatchPendingPlannerAssignments(startedWorkflow, context);
+        }
+        startedWorkflow = context.store.getWorkflowRun(workflow.id);
+      }
+
+      return {
+        room: context.store.getRoom(room.id),
+        sessions: createdSessions.map((s) => ({ session: s.session, role: s.role })),
+        workflow: startedWorkflow || workflow
+      };
     }
   };
 }
@@ -1616,6 +1970,44 @@ async function injectRolePromptIfRequested(session, membership, body, context, {
   context.store.touch(session.id);
 }
 
+async function spawnWorkflowAgent(input = {}, context) {
+  const workflow = context.store.getWorkflowRun(input.runId);
+  if (!workflow) throw new Error(`Workflow run not found: ${input.runId}`);
+  const room = context.store.getRoom(input.roomId || workflow.roomId);
+  if (!room || room.id !== workflow.roomId) throw new Error(`Room not found for workflow: ${workflow.roomId}`);
+  const role = typeof input.role === "string" && input.role.trim() ? input.role.trim() : null;
+  if (!role) throw new Error("spawn_agent requires a target role");
+  const preset = matchingRolePreset(role, context.store.listRolePresets());
+  const kind = preset?.defaultKind || "codex";
+  const existingNames = new Set(context.store.list().map((session) => session.name));
+  const baseName = sanitizeTmuxName(`${role}-${room.name}`.slice(0, 48)) || `${role}-agent`;
+  let name = baseName;
+  let suffix = 2;
+  while (existingNames.has(name)) name = `${baseName}-${suffix++}`;
+  const cwd = room.sessions?.find((member) => member.sessionCwd)?.sessionCwd;
+  const session = await createSession({
+    kind,
+    name,
+    cwd,
+    project: room.project,
+    commandArgs: []
+  }, context);
+  const membership = context.store.assignSessionToRoom(room.id, session.id, role, {
+    rolePresetId: preset?.id ?? null
+  });
+  await injectRolePromptIfRequested(session, membership, { injectRolePrompt: true }, context, { defaultEnabled: true });
+  return { session: context.store.findByIdOrName(session.id), membership };
+}
+
+function matchingRolePreset(role, presets = []) {
+  const expected = String(role).toLowerCase();
+  return presets.find((preset) =>
+    [preset.id, preset.name, preset.label]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase() === expected)
+  ) ?? null;
+}
+
 function rolePromptMessage(membership) {
   return [
     `You are assigned to room "${membership.roomName}" as "${membership.role ?? membership.rolePresetName ?? "agent"}".`,
@@ -1826,21 +2218,34 @@ function sendText(res, status, text) {
 }
 
 // Rate limiting implementation
-function checkRateLimit(ip) {
+function rateLimitBudget(url, method) {
+  if (method === "GET" && isUiPollingPath(url.pathname)) {
+    return { bucket: "ui-poll", maxRequests: RATE_LIMIT_UI_POLL_MAX_REQUESTS };
+  }
+  return { bucket: "api", maxRequests: RATE_LIMIT_MAX_REQUESTS };
+}
+
+function isUiPollingPath(pathname) {
+  if (pathname === "/api/sessions") return true;
+  const parts = pathname.split("/");
+  return parts.length === 5 && parts[1] === "api" && parts[2] === "sessions" && parts[4] === "output";
+}
+
+function checkRateLimit(key, maxRequests = RATE_LIMIT_MAX_REQUESTS) {
   const now = Date.now();
   const windowStart = now - RATE_LIMIT_WINDOW_MS;
 
-  let requests = rateLimitStore.get(ip) || [];
+  let requests = rateLimitStore.get(key) || [];
 
   // Filter out old requests
   requests = requests.filter((t) => t > windowStart);
 
-  if (requests.length >= RATE_LIMIT_MAX_REQUESTS) {
+  if (requests.length >= maxRequests) {
     return false;
   }
 
   requests.push(now);
-  rateLimitStore.set(ip, requests);
+  rateLimitStore.set(key, requests);
 
   // Periodic cleanup of old entries
   if (rateLimitStore.size > 10000) {

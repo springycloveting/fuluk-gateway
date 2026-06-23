@@ -7,8 +7,10 @@ const state = {
   rooms: [],
   roomMessages: [],
   workflows: [],
+  workflowSupervisors: new Map(),
   workflowTemplates: [],
   workflowView: false,
+  roomViewMode: "messages", // "messages" | "assistant" | "workflow"
   workflowPollTimer: null,
   rolePresets: [],
   selectedRoomId: localStorage.getItem("sessionGatewaySelectedRoomId") || "",
@@ -27,11 +29,18 @@ const state = {
   sessionLoading: false,
   outputPollDelayMs: 1000,
   outputWheelLastSentAt: 0,
+  outputScrollOffset: 0,
+  latestOutputText: "",
+  terminal: null,
+  terminalUsingXterm: false,
+  terminalRenderVersion: 0,
   terminalResizeBySession: new Map(),
   allYesMode: localStorage.getItem("sessionGatewayAllYesMode") || "off",
   autoYesSignatures: new Map(),
   cliDeploymentDefaults: {},
   notifications: {},
+  sessionAgentSettings: {},
+  workflowSupervisorSettings: {},
   pendingDeleteSession: null,
   assistantMessages: [],
   assistantRoomContext: null,
@@ -100,9 +109,8 @@ const translations = {
     assistantEmpty: "和 web-pi 对话。它会通过工具管理会话，并把结果整理成回复。",
     assistantUser: "你",
     assistantError: "错误",
-    deleteConfirm: "确认删除会话“{name}”？正在运行的会话会先停止。",
-    commandParser: "命令解析",
-    aiParserEnabled: "规则失败时使用本地模型",
+    deleteConfirm: "确认删除会话「{name}」？正在运行的会话会先停止。",
+    commandParser: "助手与命令解析",
     deployment: "部署方式",
     token: "Bearer token",
     dockerMode: "Docker",
@@ -127,6 +135,7 @@ const translations = {
     roomAssistantTitle: "群聊助手",
     roomAssistantSubtitle: "房间协调",
     roomAssistantEmpty: "群聊助手帮助协调房间内各会话的协作。可以发送任务、查看状态、分配角色。",
+    roomAssistantPlaceholder: "发送任务或询问房间状态…",
     deleteRoomTitle: "删除房间",
     deleteRoom: "删除房间",
     deleteRoomConfirm: "确认删除房间「{name}」？房间内的会话将变为独立会话。",
@@ -186,8 +195,7 @@ const translations = {
     assistantUser: "You",
     assistantError: "Error",
     deleteConfirm: "Delete session \"{name}\"? A running session will be stopped first.",
-    commandParser: "Command Parser",
-    aiParserEnabled: "Use local model when rules fail",
+    commandParser: "Assistant & Command Parser",
     deployment: "Deployment",
     token: "Bearer token",
     dockerMode: "Docker",
@@ -212,6 +220,7 @@ const translations = {
     roomAssistantTitle: "Room Assistant",
     roomAssistantSubtitle: "Room coordination",
     roomAssistantEmpty: "Room assistant helps coordinate sessions in the room. Send tasks, check status, assign roles.",
+    roomAssistantPlaceholder: "Send task or ask about room status…",
     deleteRoomTitle: "Delete Room",
     deleteRoom: "Delete Room",
     deleteRoomConfirm: "Delete room \"{name}\"? Sessions in this room will become standalone.",
@@ -257,10 +266,16 @@ const els = {
   quickKeyLabel: document.querySelector("#quick-key-label"),
   quickKeyValue: document.querySelector("#quick-key-value"),
   token: document.querySelector("#token"),
-  aiParserEnabled: document.querySelector("#ai-parser-enabled"),
   aiParserBaseUrl: document.querySelector("#ai-parser-base-url"),
   aiParserModel: document.querySelector("#ai-parser-model"),
   aiParserApiKey: document.querySelector("#ai-parser-api-key"),
+  workflowPmEnabled: document.querySelector("#workflow-pm-enabled"),
+  workflowSupervisorIntervalSeconds: document.querySelector("#workflow-supervisor-interval-seconds"),
+  workflowSupervisorStallSeconds: document.querySelector("#workflow-supervisor-stall-seconds"),
+  workflowSupervisorHardTimeoutSeconds: document.querySelector("#workflow-supervisor-hard-timeout-seconds"),
+  workflowSupervisorCooldownSeconds: document.querySelector("#workflow-supervisor-cooldown-seconds"),
+  workflowSupervisorMaxInterventions: document.querySelector("#workflow-supervisor-max-interventions"),
+  workflowSupervisorMaxSpawned: document.querySelector("#workflow-supervisor-max-spawned"),
   kind: document.querySelector("#kind"),
   createDeployment: document.querySelector("#create-deployment"),
   createDeploymentMode: document.querySelector("#create-deployment-mode"),
@@ -283,8 +298,12 @@ const els = {
   roomSubtitle: document.querySelector("#room-subtitle"),
   roomMessages: document.querySelector("#room-messages"),
   workflowTabMessages: document.querySelector("#workflow-tab-messages"),
+  workflowTabAssistant: document.querySelector("#workflow-tab-assistant"),
   workflowTabBoard: document.querySelector("#workflow-tab-board"),
   workflowBoard: document.querySelector("#workflow-board"),
+  roomAssistantPanel: document.querySelector("#room-assistant-panel"),
+  roomAssistantMessages: document.querySelector("#room-assistant-messages"),
+  clearRoomAssistant: document.querySelector("#clear-room-assistant"),
   workflowContent: document.querySelector("#workflow-content"),
   workflowRefresh: document.querySelector("#workflow-refresh"),
   workflowCreate: document.querySelector("#workflow-create"),
@@ -304,7 +323,6 @@ const els = {
   workflowTemplateNew: document.querySelector("#workflow-template-new"),
   workflowTemplateDelete: document.querySelector("#workflow-template-delete"),
   roomActions: document.querySelector("#room-actions"),
-  openRoomAssistant: document.querySelector("#open-room-assistant"),
   refreshRoomMessages: document.querySelector("#refresh-room-messages"),
   deleteRoomDialog: document.querySelector("#delete-room-dialog"),
   deleteRoomForm: document.querySelector("#delete-room-form"),
@@ -320,6 +338,8 @@ const els = {
   refresh: document.querySelector("#refresh"),
   list: document.querySelector("#session-list"),
   title: document.querySelector("#selected-title"),
+  terminalOutput: document.querySelector("#terminal-output"),
+  xtermOutput: document.querySelector("#xterm-output"),
   output: document.querySelector("#output"),
   sendTargetMode: document.querySelector("#send-target-mode"),
   sendTargetRole: document.querySelector("#send-target-role"),
@@ -351,7 +371,7 @@ els.allYes.addEventListener("click", async () => {
       await loadOutput({ force: true });
     }
     if (state.allYesMode === "session") {
-      maybeAutoYes(els.output.textContent, { force: true });
+      maybeAutoYes(state.latestOutputText, { force: true });
     } else if (state.allYesMode === "global") {
       await autoYesAllSessions();
     }
@@ -416,9 +436,17 @@ els.roomFilter.addEventListener("change", () => {
   renderQuickKeys();
 });
 els.refreshRoomMessages.addEventListener("click", loadRoomMessages);
-els.workflowTabMessages.addEventListener("click", () => showWorkflowView(false));
+els.clearRoomAssistant.addEventListener("click", () => {
+  if (!state.selectedRoomChatId) return;
+  if (!window.confirm("确认清空群聊助手对话记录？")) return;
+  state.assistantMessages = [];
+  saveRoomAssistantMessages(state.selectedRoomChatId, []);
+  renderRoomAssistantMessages();
+});
+els.workflowTabMessages.addEventListener("click", () => showRoomView("messages"));
+els.workflowTabAssistant.addEventListener("click", () => showRoomView("assistant"));
 els.workflowTabBoard.addEventListener("click", async () => {
-  showWorkflowView(true);
+  showRoomView("workflow");
   await loadWorkflows();
 });
 els.workflowRefresh.addEventListener("click", loadWorkflows);
@@ -427,9 +455,18 @@ els.workflowContent.addEventListener("click", async (event) => {
   if (!button) return;
   button.disabled = true;
   try {
-    await api(`/api/workflows/${encodeURIComponent(button.dataset.workflowId)}/${button.dataset.workflowAction}`, {
-      method: "POST",
-      body: JSON.stringify({})
+    const action = button.dataset.workflowAction;
+    const workflowId = button.dataset.workflowId;
+    const isDelete = action === "delete";
+    if (isDelete && !window.confirm("确认删除这个工作流？相关任务、监督记录和干预记录都会被清理。")) return;
+    const path = isDelete
+      ? `/api/workflows/${encodeURIComponent(workflowId)}`
+      : action === "supervisor/tick"
+        ? `/api/workflows/${encodeURIComponent(workflowId)}/supervisor/tick`
+        : `/api/workflows/${encodeURIComponent(workflowId)}/${action}`;
+    await api(path, {
+      method: isDelete ? "DELETE" : "POST",
+      ...(isDelete ? {} : { body: JSON.stringify({}) })
     });
     await loadWorkflows();
   } catch (error) {
@@ -458,10 +495,6 @@ els.workflowTemplateDelete.addEventListener("click", deleteWorkflowTemplate);
 els.workflowTemplateForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   await saveWorkflowTemplate();
-});
-els.openRoomAssistant.addEventListener("click", () => {
-  openRoomAssistantDialog();
-  els.nl.focus();
 });
 els.deleteRoomForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -544,10 +577,14 @@ els.input.addEventListener("keydown", (event) => {
   if (event.key === "Enter") sendInput();
   if (!selectedRoomForChat() && (event.key === "PageUp" || event.key === "PageDown")) {
     event.preventDefault();
-    sendQuickKeys([event.key]);
+    if (shouldUsePaneWheel(currentSelectedSession())) {
+      sendQuickKeys([event.key === "PageUp" ? "WheelUpPane" : "WheelDownPane"]);
+    } else {
+      scrollOutputHistory(event.key === "PageUp" ? -1 : 1);
+    }
   }
 });
-els.output.addEventListener("wheel", handleOutputWheel, { passive: false });
+els.terminalOutput.addEventListener("wheel", handleOutputWheel, { passive: false, capture: true });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     closeSessionsPanel();
@@ -595,7 +632,6 @@ async function loadConfig() {
   try {
     const data = await api("/api/config");
     applyServerSettings(data.settings);
-    applyAiParserVisibility();
   } catch (error) {
     showError(error);
   }
@@ -612,66 +648,61 @@ async function saveConfig() {
     applyTheme();
 
     const commandParser = {
-      enabled: els.aiParserEnabled.checked,
-      mode: els.aiParserEnabled.checked ? "rules-first-ai-fallback" : "rules-only"
+      enabled: true,
+      mode: "rules-first-ai-fallback",
+      baseUrl: els.aiParserBaseUrl.value,
+      model: els.aiParserModel.value,
+      apiKey: els.aiParserApiKey.value
     };
 
-    if (els.aiParserEnabled.checked && !isAiParserConfigSaved()) {
-      commandParser.baseUrl = els.aiParserBaseUrl.value;
-      commandParser.model = els.aiParserModel.value;
-      commandParser.apiKey = els.aiParserApiKey.value;
-
-      localStorage.setItem("sessionGatewayAiParser", JSON.stringify({
-        baseUrl: els.aiParserBaseUrl.value,
-        model: els.aiParserModel.value,
-        apiKey: els.aiParserApiKey.value
-      }));
-    } else if (isAiParserConfigSaved()) {
-      const saved = JSON.parse(localStorage.getItem("sessionGatewayAiParser") || "{}");
-      commandParser.baseUrl = saved.baseUrl;
-      commandParser.model = saved.model;
-      commandParser.apiKey = saved.apiKey;
-    }
+    localStorage.setItem("sessionGatewayAiParser", JSON.stringify({
+      baseUrl: els.aiParserBaseUrl.value,
+      model: els.aiParserModel.value,
+      apiKey: els.aiParserApiKey.value
+    }));
 
     const settings = {
       cliDeployment: state.cliDeploymentDefaults,
       notifications: state.notifications,
-      commandParser
+      commandParser,
+      workflowSupervisor: {
+        ...state.workflowSupervisorSettings,
+        pmAgentEnabled: els.workflowPmEnabled.checked,
+        intervalMs: secondsInputToMs(els.workflowSupervisorIntervalSeconds, 60),
+        stallMs: secondsInputToMs(els.workflowSupervisorStallSeconds, 15 * 60),
+        hardTimeoutMs: secondsInputToMs(els.workflowSupervisorHardTimeoutSeconds, 60 * 60),
+        sameActionCooldownMs: secondsInputToMs(els.workflowSupervisorCooldownSeconds, 10 * 60),
+        maxInterventionsPerAssignment: numberInput(els.workflowSupervisorMaxInterventions, 3),
+        maxSpawnedAgentsPerRoom: numberInput(els.workflowSupervisorMaxSpawned, 3)
+      }
     };
     const data = await api("/api/config", {
       method: "PUT",
       body: JSON.stringify({ settings })
     });
     applyServerSettings(data.settings);
-    applyAiParserVisibility();
     els.configDialog.close();
   } catch (error) {
     showError(error);
   }
 }
 
-function isAiParserConfigSaved() {
-  const saved = localStorage.getItem("sessionGatewayAiParser");
-  if (!saved) return false;
-  const config = JSON.parse(saved);
-  return config.baseUrl && config.model;
+function numberInput(input, fallback) {
+  const value = Number.parseInt(input.value, 10);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
-function applyAiParserVisibility() {
-  const saved = isAiParserConfigSaved();
-  const fieldset = els.aiParserEnabled.closest("fieldset");
-  const inputs = fieldset.querySelectorAll("input:not(#ai-parser-enabled)");
+function numberOrFallback(value, fallback) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
 
-  inputs.forEach((input) => {
-    input.hidden = saved;
-  });
+function secondsInputToMs(input, fallbackSeconds) {
+  return numberInput(input, fallbackSeconds) * 1000;
+}
 
-  if (saved) {
-    const config = JSON.parse(localStorage.getItem("sessionGatewayAiParser") || "{}");
-    els.aiParserBaseUrl.value = config.baseUrl || "";
-    els.aiParserModel.value = config.model || "";
-    els.aiParserApiKey.value = config.apiKey || "";
-  }
+function setSecondsInput(input, value, fallbackSeconds) {
+  const milliseconds = numberOrFallback(value, fallbackSeconds * 1000);
+  input.value = String(Math.round(milliseconds / 1000));
 }
 
 async function loadRooms() {
@@ -710,15 +741,22 @@ async function loadRoomMessages() {
   }
 }
 
-function showWorkflowView(enabled) {
-  state.workflowView = enabled;
-  els.roomMessages.hidden = enabled;
-  els.workflowBoard.hidden = !enabled;
-  els.workflowTabMessages.classList.toggle("active", !enabled);
-  els.workflowTabBoard.classList.toggle("active", enabled);
-  els.roomActions.hidden = enabled;
-  els.input.closest(".input-row").hidden = enabled;
-  if (!enabled) clearWorkflowPoll();
+function showRoomView(mode) {
+  state.roomViewMode = mode;
+  state.workflowView = mode === "workflow";
+  els.roomMessages.hidden = mode !== "messages";
+  els.roomAssistantPanel.hidden = mode !== "assistant";
+  els.workflowBoard.hidden = mode !== "workflow";
+  els.workflowTabMessages.classList.toggle("active", mode === "messages");
+  els.workflowTabAssistant.classList.toggle("active", mode === "assistant");
+  els.workflowTabBoard.classList.toggle("active", mode === "workflow");
+  els.roomActions.hidden = mode === "workflow";
+  els.input.closest(".input-row").hidden = mode === "workflow";
+  updateInputPlaceholder();
+  if (mode === "assistant" && state.assistantRoomContext) {
+    renderRoomAssistantMessages();
+  }
+  if (mode !== "workflow") clearWorkflowPoll();
 }
 
 async function loadWorkflows() {
@@ -728,11 +766,24 @@ async function loadWorkflows() {
     const data = await api(`/api/rooms/${encodeURIComponent(roomId)}/workflows`);
     if (roomId !== state.selectedRoomChatId) return;
     state.workflows = data.workflows ?? [];
+    await loadWorkflowSupervisors(state.workflows);
     renderWorkflows();
     scheduleWorkflowPoll();
   } catch (error) {
     showError(error);
   }
+}
+
+async function loadWorkflowSupervisors(workflows) {
+  const entries = await Promise.all((workflows ?? []).map(async (workflow) => {
+    try {
+      const data = await api(`/api/workflows/${encodeURIComponent(workflow.id)}/supervisor`);
+      return [workflow.id, { ok: true, ...(data.supervisor ?? {}) }];
+    } catch (error) {
+      return [workflow.id, { ok: false, error: error.message }];
+    }
+  }));
+  state.workflowSupervisors = new Map(entries);
 }
 
 async function createWorkflow() {
@@ -827,15 +878,50 @@ function renderWorkflows() {
     <article class="workflow-run">
       <header>
         <div><strong>${escapeHtml(workflow.objective)}</strong><small>${escapeHtml(workflow.templateName || "标准项目交付")} · ${escapeHtml(workflowStageName(workflow.currentStage))}</small></div>
-        <span class="workflow-state ${escapeHtml(workflow.status)}">${escapeHtml(workflowStateName(workflow.status))}</span>
+        <div class="workflow-run-actions">
+          <span class="workflow-state ${escapeHtml(workflow.status)}">${escapeHtml(workflowStateName(workflow.status))}</span>
+          <button class="workflow-delete" type="button" data-workflow-action="delete" data-workflow-id="${escapeHtml(workflow.id)}" title="删除工作流" aria-label="删除工作流">删除</button>
+        </div>
       </header>
       <div class="workflow-progress"><span style="width:${workflowProgress(workflow)}%"></span></div>
       <div class="workflow-gates">${currentWorkflowAssignments(workflow.runAssignments).map(renderWorkflowAssignment).join("")}</div>
       <div class="workflow-items">${(workflow.workItems ?? []).map(renderWorkflowItem).join("") || "<span>等待 Planner 拆解任务</span>"}</div>
+      ${renderWorkflowSupervisor(workflow)}
       ${(workflow.artifacts ?? []).map((artifact) => `<code class="workflow-artifact">${escapeHtml(artifact.location)}</code>`).join("")}
       ${!["completed", "cancelled"].includes(workflow.status) ? `<button class="ghost workflow-advance" type="button" data-workflow-action="${workflow.status === "draft" ? "start" : "advance"}" data-workflow-id="${escapeHtml(workflow.id)}">${workflow.status === "draft" ? "启动" : "继续流转"}</button>` : ""}
     </article>
   `).join("");
+}
+
+function renderWorkflowSupervisor(workflow) {
+  const supervisor = state.workflowSupervisors.get(workflow.id);
+  if (!supervisor) return "";
+  if (!supervisor.ok) {
+    return `<section class="workflow-supervisor error"><strong>PM 监督</strong><span>${escapeHtml(supervisor.error || "加载失败")}</span></section>`;
+  }
+  const latestObservation = supervisor.observations?.[0] ?? null;
+  const latestIntervention = supervisor.interventions?.[0] ?? null;
+  const issues = latestObservation?.detectedIssues ?? [];
+  const pmEnabled = supervisor.options?.pmAgentEnabled;
+  const issueText = issues.length
+    ? issues.slice(0, 2).map((issue) => `${issue.type}: ${issue.reason || issue.assignmentId || ""}`).join("；")
+    : "暂无异常";
+  const interventionText = latestIntervention
+    ? `${latestIntervention.source}/${latestIntervention.actionType} · ${latestIntervention.validationStatus}`
+    : "暂无干预";
+  return `<section class="workflow-supervisor">
+    <header>
+      <strong>PM 监督</strong>
+      <span class="workflow-state ${pmEnabled ? "completed" : "pending"}">${pmEnabled ? "PM Agent 已启用" : "PM Agent 未启用"}</span>
+    </header>
+    <div class="workflow-supervisor-grid">
+      <span>Supervisor：${supervisor.enabled ? "运行中" : "未启动"}</span>
+      <span>最近观察：${escapeHtml(latestObservation?.createdAt ? formatTime(latestObservation.createdAt) : "无")}</span>
+      <span>问题：${escapeHtml(issueText)}</span>
+      <span>干预：${escapeHtml(interventionText)}</span>
+    </div>
+    <button class="ghost" type="button" data-workflow-action="supervisor/tick" data-workflow-id="${escapeHtml(workflow.id)}">立即监督一次</button>
+  </section>`;
 }
 
 function renderWorkflowItem(item) {
@@ -1180,7 +1266,7 @@ async function runNaturalCommand() {
       appendAssistantMessage("assistant", formatCommandResult(result));
       const updateTerminal = result.presentation?.updateTerminal !== false;
       if (updateTerminal && typeof result.output === "string") {
-        els.output.textContent = result.output;
+        updateOutputText(result.output);
         if (state.selected) clearOutputEtag(state.selected.id);
       }
       await refreshSessions();
@@ -1207,18 +1293,20 @@ async function loadOutput(options = {}) {
   state.outputLoadingSessionId = sessionId;
   try {
     const params = new URLSearchParams({ lines: "300", format: "json" });
+    if (state.outputScrollOffset > 0) params.set("offset", String(state.outputScrollOffset));
+    if (selected.kind !== "runtime" && ensureTerminal()) params.set("raw", "1");
     const etag = state.outputEtags.get(sessionId);
     if (etag && !options.force) params.set("etag", etag);
     const data = await api(`/api/sessions/${encodeURIComponent(sessionId)}/output?${params}`);
     if (state.selectedSessionId !== sessionId) return null;
     if (typeof data === "string") {
-      updateOutputText(data);
+      updateOutputText(data, { history: state.outputScrollOffset > 0 });
       clearOutputEtag(sessionId);
       return true;
     }
     if (data.etag) state.outputEtags.set(sessionId, data.etag);
     if (!data.changed) return false;
-    updateOutputText(data.output ?? "");
+    updateOutputText(data.output ?? "", { history: state.outputScrollOffset > 0 });
     return true;
   } catch (error) {
     showError(error);
@@ -1246,19 +1334,20 @@ async function resizeTerminalForSession(session) {
 }
 
 function measureTerminalSize() {
-  if (!els.output || els.output.hidden) return null;
-  const style = getComputedStyle(els.output);
+  const target = terminalMeasureElement();
+  if (!target || target.hidden) return null;
+  const style = getComputedStyle(target);
   const width =
-    els.output.clientWidth - parseFloat(style.paddingLeft || "0") - parseFloat(style.paddingRight || "0");
+    target.clientWidth - parseFloat(style.paddingLeft || "0") - parseFloat(style.paddingRight || "0");
   const height =
-    els.output.clientHeight - parseFloat(style.paddingTop || "0") - parseFloat(style.paddingBottom || "0");
+    target.clientHeight - parseFloat(style.paddingTop || "0") - parseFloat(style.paddingBottom || "0");
   if (width <= 0 || height <= 0) return null;
 
   const probe = document.createElement("span");
   probe.textContent = "MMMMMMMMMM";
   probe.style.cssText =
     "position:absolute;visibility:hidden;white-space:pre;left:-9999px;top:-9999px;font:inherit;";
-  els.output.appendChild(probe);
+  target.appendChild(probe);
   const charWidth = probe.getBoundingClientRect().width / 10;
   probe.remove();
 
@@ -1274,34 +1363,135 @@ function clampInteger(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
-function updateOutputText(text) {
+function updateOutputText(text, options = {}) {
+    const outputText = String(text ?? "");
+    state.latestOutputText = outputText;
     const shouldStickToBottom =
-      els.output.scrollHeight - els.output.scrollTop - els.output.clientHeight < 48;
-    els.output.textContent = text;
+      els.terminalOutput.scrollHeight - els.terminalOutput.scrollTop - els.terminalOutput.clientHeight < 48;
+    const renderedWithXterm = renderTerminalText(outputText);
+    if (!renderedWithXterm) {
+      if (els.xtermOutput) els.xtermOutput.hidden = true;
+      els.output.hidden = false;
+    }
+    els.output.textContent = renderedWithXterm ? "" : outputText;
     els.title.textContent = state.selected.name;
     if (shouldStickToBottom) {
-      els.output.scrollTop = els.output.scrollHeight;
+      els.terminalOutput.scrollTop = els.terminalOutput.scrollHeight;
     }
-    markSelectedTaskState(findYesOption(text) ? "needs_confirmation" : "in_progress");
-    maybeAutoYes(text);
+    if (!options.history) {
+      markSelectedTaskState(findYesOption(outputText) ? "needs_confirmation" : "in_progress");
+      maybeAutoYes(outputText);
+    }
+}
+
+function terminalMeasureElement() {
+  return state.terminalUsingXterm ? els.xtermOutput : els.output;
+}
+
+function ensureTerminal() {
+  if (state.terminal) return true;
+  if (!els.xtermOutput || typeof window.Terminal !== "function") return false;
+  els.xtermOutput.replaceChildren();
+  state.terminal = new window.Terminal({
+    allowProposedApi: false,
+    convertEol: true,
+    cursorBlink: false,
+    disableStdin: true,
+    fontFamily: "\"SFMono-Regular\", Consolas, \"Liberation Mono\", monospace",
+    fontSize: 13,
+    lineHeight: 1.45,
+    scrollback: 0,
+    theme: terminalTheme()
+  });
+  state.terminal.open(els.xtermOutput);
+  state.terminalUsingXterm = true;
+  els.xtermOutput.hidden = false;
+  els.output.hidden = true;
+  return true;
+}
+
+function renderTerminalText(text) {
+  if (!els.xtermOutput || typeof window.Terminal !== "function") return false;
+  if (!ensureTerminal()) return false;
+  const size = measureTerminalSize();
+  if (size) state.terminal.resize(size.cols, size.rows);
+  const version = (state.terminalRenderVersion += 1);
+  const snapshot = text || "";
+  state.terminal.write("\x1b[3J\x1b[2J\x1b[H" + snapshot, () => {
+    if (version === state.terminalRenderVersion) state.terminal.scrollToTop();
+  });
+  return true;
+}
+
+function disposeTerminal() {
+  if (state.terminal) {
+    state.terminal.dispose();
+    state.terminal = null;
+  }
+  state.terminalUsingXterm = false;
+  if (els.xtermOutput) els.xtermOutput.replaceChildren();
+}
+
+function terminalTheme() {
+  if (state.theme === "light") {
+    return {
+      background: "#ffffff",
+      foreground: "#17202a",
+      cursor: "#1f6feb",
+      selectionBackground: "#c6d0dc"
+    };
+  }
+  return {
+    background: "#05080c",
+    foreground: "#dbe7f3",
+    cursor: "#2f81f7",
+    selectionBackground: "#2b3745"
+  };
 }
 
 function handleOutputWheel(event) {
   if (!shouldForwardOutputWheel(event)) return;
   event.preventDefault();
   const now = Date.now();
-  if (now - state.outputWheelLastSentAt < 120) return;
+  if (now - state.outputWheelLastSentAt < 180) return;
   state.outputWheelLastSentAt = now;
-  sendQuickKeys([event.deltaY < 0 ? "PageUp" : "PageDown"]);
+  const selected = currentSelectedSession();
+  if (shouldUsePaneWheel(selected)) {
+    const wheelKey = event.deltaY < 0 ? "WheelUpPane" : "WheelDownPane";
+    sendQuickKeys(Array.from({ length: 5 }, () => wheelKey), { skipRefresh: true });
+    return;
+  }
+  scrollOutputHistory(event.deltaY < 0 ? -1 : 1);
+}
+
+function shouldUsePaneWheel(session) {
+  return session?.kind === "opencode";
 }
 
 function shouldForwardOutputWheel(event) {
   const selected = currentSelectedSession();
   if (!selected || selected.status !== "running" || selected.kind === "runtime") return false;
   if (!event.deltaY) return false;
-  const canScrollUp = els.output.scrollTop > 0;
-  const canScrollDown = els.output.scrollTop + els.output.clientHeight < els.output.scrollHeight - 1;
+  if (state.terminalUsingXterm) return true;
+  const scroller = els.terminalOutput;
+  const canScrollUp = scroller.scrollTop > 0;
+  const canScrollDown = scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 1;
   return event.deltaY < 0 ? !canScrollUp : !canScrollDown;
+}
+
+function scrollOutputHistory(direction) {
+  const selected = currentSelectedSession();
+  if (!selected || selected.status !== "running") return false;
+  const terminalSize = measureTerminalSize();
+  const step = Math.max(5, Math.floor((terminalSize?.rows ?? 30) * 0.8));
+  const nextOffset = direction < 0
+    ? Math.min(state.outputScrollOffset + step, 5000)
+    : Math.max(state.outputScrollOffset - step, 0);
+  if (nextOffset === state.outputScrollOffset) return false;
+  state.outputScrollOffset = nextOffset;
+  clearOutputEtag(selected.id);
+  loadOutput({ force: true });
+  return true;
 }
 
 function updateAllYesButton() {
@@ -1387,7 +1577,11 @@ function stripAnsi(text) {
 
 async function sendInput() {
   if (selectedRoomForChat()) {
-    await sendRoomInput();
+    if (state.roomViewMode === "assistant") {
+      await sendRoomAssistantInput();
+    } else {
+      await sendRoomInput();
+    }
     return;
   }
   const session = currentSelectedSession();
@@ -1406,6 +1600,7 @@ async function sendInput() {
       body: JSON.stringify({ text: els.input.value })
     });
     els.input.value = "";
+    state.outputScrollOffset = 0;
     clearOutputEtag(session.id);
     resetOutputPolling(500);
   } catch (error) {
@@ -1461,12 +1656,115 @@ function buildRoomMessageTarget() {
   return { mode: "all" };
 }
 
+async function sendRoomAssistantInput() {
+  const text = els.input.value.trim();
+  if (!text) return;
+  appendRoomAssistantMessage("user", text);
+  els.input.value = "";
+  els.send.disabled = true;
+  try {
+    const body = { text, currentSessionId: state.selected?.id };
+    if (state.assistantRoomContext) {
+      body.roomContext = state.assistantRoomContext;
+    }
+    const result = await api("/api/nl", {
+      method: "POST",
+      body: JSON.stringify(body)
+    });
+    if (typeof result === "string") {
+      appendRoomAssistantMessage("assistant", result);
+    } else {
+      if (result.session) {
+        state.selected = result.session;
+        state.selectedSessionId = result.session.id;
+        state.selectionVersion += 1;
+      }
+      appendRoomAssistantMessage("assistant", formatCommandResult(result));
+      const updateTerminal = result.presentation?.updateTerminal !== false;
+      if (updateTerminal && typeof result.output === "string") {
+        els.output.textContent = result.output;
+        if (state.selected) clearOutputEtag(state.selected.id);
+      }
+      await refreshSessions();
+      if (updateTerminal) resetOutputPolling(500);
+    }
+  } catch (error) {
+    appendRoomAssistantMessage("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    els.send.disabled = false;
+    els.input.focus();
+  }
+}
+
+function getRoomAssistantMessagesKey(roomId) {
+  return `sessionGatewayRoomAssistant_${roomId}`;
+}
+
+function loadRoomAssistantMessages(roomId) {
+  if (!roomId) return [];
+  try {
+    const saved = localStorage.getItem(getRoomAssistantMessagesKey(roomId));
+    if (saved) {
+      return JSON.parse(saved);
+    }
+  } catch (e) {
+    console.warn("Failed to load room assistant messages:", e);
+  }
+  return [];
+}
+
+function saveRoomAssistantMessages(roomId, messages) {
+  if (!roomId) return;
+  try {
+    localStorage.setItem(getRoomAssistantMessagesKey(roomId), JSON.stringify(messages));
+  } catch (e) {
+    console.warn("Failed to save room assistant messages:", e);
+  }
+}
+
+function appendRoomAssistantMessage(role, text) {
+  state.assistantMessages.push({ role, text, timestamp: Date.now() });
+  saveRoomAssistantMessages(state.selectedRoomChatId, state.assistantMessages);
+  renderRoomAssistantMessages();
+}
+
+function renderRoomAssistantMessages() {
+  if (!els.roomAssistantMessages) return;
+  if (!state.assistantMessages.length) {
+    const emptyText = t("roomAssistantEmpty");
+    els.roomAssistantMessages.innerHTML = `<div class="room-assistant-empty">${escapeHtml(emptyText)}</div>`;
+    return;
+  }
+  els.roomAssistantMessages.innerHTML = state.assistantMessages
+    .map((message) => {
+      const roleLabel =
+        message.role === "user"
+          ? t("assistantUser")
+          : message.role === "error"
+            ? t("assistantError")
+            : "web-pi";
+      return `
+        <div class="room-assistant-message ${escapeHtml(message.role)}">
+          <div class="room-assistant-role">${escapeHtml(roleLabel)}</div>
+          <div class="room-assistant-text">${escapeHtml(message.text)}</div>
+        </div>
+      `;
+    })
+    .join("");
+  els.roomAssistantMessages.scrollTop = els.roomAssistantMessages.scrollHeight;
+}
+
 function sendInputPlaceholder() {
   if (!selectedRoomForChat()) return t("sendPlaceholder");
+  if (state.roomViewMode === "assistant") return t("roomAssistantPlaceholder");
   if (state.selectedRoomTargetMode === "all") return t("roomAll");
   if (state.selectedRoomTargetMode === "role") return t("roomRole");
   if (state.selectedRoomTargetMode === "session-in-room") return t("roomSession");
   return t("sendPlaceholder");
+}
+
+function updateInputPlaceholder() {
+  els.input.placeholder = sendInputPlaceholder();
 }
 
 async function sendQuickText(text) {
@@ -1479,6 +1777,7 @@ async function sendQuickText(text) {
       method: "POST",
       body: JSON.stringify({ text })
     });
+    state.outputScrollOffset = 0;
     clearOutputEtag(state.selected.id);
     resetOutputPolling(500);
   } catch (error) {
@@ -1508,7 +1807,7 @@ async function sendAutoYes(sessionId, signature, key = "1", type = "text", optio
   }
 }
 
-async function sendQuickKeys(keys) {
+async function sendQuickKeys(keys, options = {}) {
   if (!state.selected || state.selected.status !== "running") {
     showError(new Error(t("selectRunning")));
     return;
@@ -1518,7 +1817,10 @@ async function sendQuickKeys(keys) {
       method: "POST",
       body: JSON.stringify({ keys })
     });
-    clearOutputEtag(state.selected.id);
+    if (!options.skipRefresh) {
+      state.outputScrollOffset = 0;
+      clearOutputEtag(state.selected.id);
+    }
     resetOutputPolling(500);
   } catch (error) {
     showError(error);
@@ -1648,8 +1950,11 @@ function quickKeysForKind(kind) {
     return [
       { label: t("stopGeneration"), type: "key", value: "Escape", title: "Escape" },
       { label: "Shift+Tab", type: "key", value: "BTab" },
-      { label: t("pageUp"), type: "key", value: "PageUp", title: "PageUp" },
-      { label: t("pageDown"), type: "key", value: "PageDown", title: "PageDown" }
+      { label: "↑", type: "key", value: "Up", title: "Up" },
+      { label: "↓", type: "key", value: "Down", title: "Down" },
+      { label: "Enter", type: "key", value: "Enter", title: "Enter" },
+      { label: t("pageUp"), type: "history-page", value: "up", title: "PageUp" },
+      { label: t("pageDown"), type: "history-page", value: "down", title: "PageDown" }
     ];
   }
   return [];
@@ -1665,6 +1970,14 @@ function activateQuickKey(quickKey) {
   }
   if (quickKey.type === "key") {
     sendQuickKeys([quickKey.value]);
+    return;
+  }
+  if (quickKey.type === "history-page") {
+    if (shouldUsePaneWheel(currentSelectedSession())) {
+      sendQuickKeys([quickKey.value === "up" ? "WheelUpPane" : "WheelDownPane"]);
+    } else {
+      scrollOutputHistory(quickKey.value === "up" ? -1 : 1);
+    }
     return;
   }
   sendQuickText(quickKey.value);
@@ -1858,6 +2171,7 @@ async function selectSession(session) {
   renderQuickKeys();
   closeSessionsPanel();
   if (session.status === "running") {
+    state.outputScrollOffset = 0;
     clearOutputEtag(session.id);
     try {
       await resizeTerminalForSession(session);
@@ -1880,6 +2194,23 @@ async function selectRoomChat(room) {
   state.selectionVersion += 1;
   state.workflowView = false;
   state.workflows = [];
+  state.roomViewMode = "messages";
+  // Initialize assistant context for the room
+  const sessions = room.sessions ?? [];
+  state.assistantRoomContext = {
+    roomId: room.id,
+    roomName: room.name,
+    project: room.project,
+    objective: room.objective,
+    sessions: sessions.map((s) => ({
+      sessionId: s.sessionId,
+      sessionName: s.sessionName,
+      role: s.role || s.rolePresetLabel || null,
+      status: s.sessionStatus
+    }))
+  };
+  // Load persisted assistant messages for this room
+  state.assistantMessages = loadRoomAssistantMessages(room.id);
   delete els.roomMessages.dataset.signature;
   clearOutputPoll();
   renderSessions();
@@ -1888,7 +2219,7 @@ async function selectRoomChat(room) {
   renderRoomPanel();
   closeSessionsPanel();
   await loadRoomMessages();
-  showWorkflowView(false);
+  showRoomView("messages");
   els.title.textContent = `${t("projectGroupChat")} · ${room.name}`;
   els.input.focus();
 }
@@ -1896,6 +2227,9 @@ async function selectRoomChat(room) {
 function showTerminalView() {
   clearWorkflowPoll();
   state.selectedRoomChatId = "";
+  state.assistantRoomContext = null;
+  state.assistantMessages = [];
+  state.roomViewMode = "messages";
   delete els.roomMessages.dataset.signature;
   els.output.hidden = false;
   els.roomPanel.hidden = true;
@@ -1927,9 +2261,6 @@ function openRoomAssistantDialog() {
   const room = selectedRoomForChat();
   if (!room) return;
   const sessions = room.sessions ?? [];
-  const roleSummary = sessions
-    .map((s) => `${s.sessionName}(${s.role || s.rolePresetLabel || "agent"})`)
-    .join(", ");
   state.assistantRoomContext = {
     roomId: room.id,
     roomName: room.name,
@@ -1942,11 +2273,8 @@ function openRoomAssistantDialog() {
       status: s.sessionStatus
     }))
   };
-  state.assistantMessages = [];
-  els.runDialog.classList.add("open");
-  els.runDialog.setAttribute("aria-hidden", "false");
-  els.runDialog.querySelector(".assistant-subtitle").textContent = `${t("roomAssistantSubtitle")} · ${room.name}`;
-  renderAssistantMessages();
+  showRoomView("assistant");
+  els.input.focus();
 }
 
 function closeAssistant() {
@@ -2044,6 +2372,17 @@ function focusSessionInput() {
 function applyServerSettings(settings) {
   state.cliDeploymentDefaults = settings?.cliDeployment ?? {};
   state.notifications = settings?.notifications ?? {};
+  state.sessionAgentSettings = settings?.sessionAgent ?? {};
+  state.workflowSupervisorSettings = settings?.workflowSupervisor ?? {};
+  els.workflowPmEnabled.checked = Boolean(state.workflowSupervisorSettings.pmAgentEnabled);
+  setSecondsInput(els.workflowSupervisorIntervalSeconds, state.workflowSupervisorSettings.intervalMs, 60);
+  setSecondsInput(els.workflowSupervisorStallSeconds, state.workflowSupervisorSettings.stallMs, 15 * 60);
+  setSecondsInput(els.workflowSupervisorHardTimeoutSeconds, state.workflowSupervisorSettings.hardTimeoutMs, 60 * 60);
+  setSecondsInput(els.workflowSupervisorCooldownSeconds, state.workflowSupervisorSettings.sameActionCooldownMs, 10 * 60);
+  els.workflowSupervisorMaxInterventions.value = String(
+    numberOrFallback(state.workflowSupervisorSettings.maxInterventionsPerAssignment, 3)
+  );
+  els.workflowSupervisorMaxSpawned.value = String(numberOrFallback(state.workflowSupervisorSettings.maxSpawnedAgentsPerRoom, 3));
   const commandParser = settings?.commandParser ?? {};
 
   const savedConfig = localStorage.getItem("sessionGatewayAiParser");
@@ -2053,13 +2392,11 @@ function applyServerSettings(settings) {
       els.aiParserBaseUrl.value = saved.baseUrl;
       els.aiParserModel.value = saved.model || "";
       els.aiParserApiKey.value = saved.apiKey || "";
-      els.aiParserEnabled.checked = commandParser.enabled;
       updateCreateDeploymentControls();
       return;
     }
   }
 
-  els.aiParserEnabled.checked = Boolean(commandParser.enabled);
   els.aiParserBaseUrl.value = commandParser.baseUrl ?? "";
   els.aiParserModel.value = commandParser.model ?? "";
   els.aiParserApiKey.value = commandParser.apiKey ?? "";
@@ -2128,6 +2465,7 @@ function applyLanguage() {
 
 function applyTheme() {
   document.documentElement.dataset.theme = state.theme;
+  if (state.terminal) state.terminal.options.theme = terminalTheme();
 }
 
 function t(key) {
@@ -2135,13 +2473,20 @@ function t(key) {
 }
 
 function showError(error) {
-  els.output.textContent = error instanceof Error ? error.message : String(error);
+  updateOutputText(error instanceof Error ? error.message : String(error));
 }
 
 function formatCommandResult(result) {
   if (!result || typeof result !== "object") return String(result);
-  if (result.command?.type === "assistant" && typeof result.answer === "string" && result.answer.trim()) {
-    return result.answer;
+  if (result.command?.type === "assistant") {
+    if (typeof result.answer === "string" && result.answer.trim()) {
+      return result.answer;
+    }
+    if (!result.ok) {
+      return state.language === "zh"
+        ? "助手处理请求时遇到问题，请稍后重试。"
+        : "The assistant encountered an issue processing your request. Please try again.";
+    }
   }
   if (Array.isArray(result.sessions)) return formatSessionList(result.sessions);
   if (result.command?.type === "help" && typeof result.help === "string") return result.help;
@@ -2204,7 +2549,7 @@ async function refreshSelectedOutput() {
     return;
   }
   const changed = await loadOutput();
-  if (changed === false) maybeAutoYes(els.output.textContent);
+  if (changed === false && state.outputScrollOffset === 0) maybeAutoYes(state.latestOutputText);
   updateOutputPollDelay(changed);
   scheduleOutputPoll(state.outputPollDelayMs);
 }

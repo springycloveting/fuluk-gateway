@@ -4,7 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AI CLI Session Manager</title>
+    <link rel="stylesheet" href="/vendor/xterm/xterm.min.css" />
     <link rel="stylesheet" href="/styles.css" />
+    <script src="/vendor/xterm/xterm.min.js"></script>
   </head>
   <body>
     <main class="shell">
@@ -34,10 +36,18 @@
             </div>
             <div class="workflow-tabs">
               <button id="workflow-tab-messages" class="ghost active" type="button">消息</button>
+              <button id="workflow-tab-assistant" class="ghost" type="button">群聊助手</button>
               <button id="workflow-tab-board" class="ghost" type="button">工作流</button>
             </div>
           </div>
           <div id="room-messages" class="room-messages"></div>
+          <section id="room-assistant-panel" class="room-assistant-panel" hidden>
+            <header class="room-assistant-head">
+              <span>群聊助手对话记录</span>
+              <button id="clear-room-assistant" class="ghost" type="button">清空对话</button>
+            </header>
+            <div id="room-assistant-messages" class="room-assistant-messages" aria-live="polite"></div>
+          </section>
           <section id="workflow-board" class="workflow-board" hidden>
             <header class="workflow-board-head">
               <strong>项目工作流</strong>
@@ -49,11 +59,13 @@
             <div id="workflow-content" class="workflow-content"></div>
           </section>
         </section>
-        <pre id="output"></pre>
+        <div id="terminal-output" class="terminal-output">
+          <div id="xterm-output" class="xterm-output" hidden></div>
+          <pre id="output"></pre>
+        </div>
         <div class="quick-key-row">
           <div id="quick-keys" class="quick-keys" aria-label="快捷键"></div>
           <div id="room-actions" class="room-actions" hidden>
-            <button id="open-room-assistant" class="ghost" type="button">群聊助手</button>
             <select id="send-target-mode" title="发送目标">
               <option value="all">房间全员</option>
               <option value="role">按角色</option>
@@ -110,14 +122,27 @@
             <input id="token" type="password" autocomplete="off" placeholder="SESSION_GATEWAY_TOKEN" />
           </label>
           <fieldset>
-            <legend data-i18n="commandParser">命令解析</legend>
-            <label class="inline-check">
-              <input id="ai-parser-enabled" type="checkbox" />
-              <span data-i18n="aiParserEnabled">规则失败时使用本地模型</span>
-            </label>
-            <input id="ai-parser-base-url" placeholder="http://127.0.0.1:1234" />
-            <input id="ai-parser-model" placeholder="local-model" />
+            <legend data-i18n="commandParser">助手与命令解析</legend>
+            <small>用于群聊助手、会话助手和自然语言命令解析。格式：provider:model-id，例如 openai:gpt-4o 或 anthropic:claude-sonnet-4-20250514</small>
+            <input id="ai-parser-base-url" placeholder="API base URL，例如 https://api.anthropic.com" />
+            <input id="ai-parser-model" placeholder="provider:model-id，例如 anthropic:claude-sonnet-4-20250514" />
             <input id="ai-parser-api-key" type="password" autocomplete="off" placeholder="API key" />
+          </fieldset>
+          <fieldset>
+            <legend>PM 监督</legend>
+            <label class="inline-check">
+              <input id="workflow-pm-enabled" type="checkbox" />
+              <span>启用 PM Agent 自动判断</span>
+            </label>
+            <div class="config-grid">
+              <label><span>监督间隔（秒）</span><input id="workflow-supervisor-interval-seconds" type="number" min="0" step="1" /></label>
+              <label><span>卡住判定（秒）</span><input id="workflow-supervisor-stall-seconds" type="number" min="0" step="1" /></label>
+              <label><span>硬超时（秒）</span><input id="workflow-supervisor-hard-timeout-seconds" type="number" min="0" step="1" /></label>
+              <label><span>干预冷却（秒）</span><input id="workflow-supervisor-cooldown-seconds" type="number" min="0" step="1" /></label>
+              <label><span>单任务最大干预</span><input id="workflow-supervisor-max-interventions" type="number" min="0" step="1" /></label>
+              <label><span>每房间最大自动创建 Agent</span><input id="workflow-supervisor-max-spawned" type="number" min="0" step="1" /></label>
+            </div>
+            <small>启用后，Supervisor 检测到工作流异常时会调用 PM Agent，并按 Harness 校验后的 JSON 决策执行干预。</small>
           </fieldset>
           <button id="save-config" type="submit" data-i18n="save">保存</button>
         </form>

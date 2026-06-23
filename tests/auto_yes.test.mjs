@@ -22,9 +22,10 @@ test("All Yes never targets a stopped or missing session", () => {
   assert.equal(canAutoYesSession(sessions, "selected", "missing", { allowBackground: true }), false);
 });
 
-test("All Yes suppresses immediate duplicates but retries an identical prompt after cooldown", () => {
+test("All Yes suppresses immediate repeats even when the prompt signature changes", () => {
   const previous = { signature: "1. Yes", sentAt: 1_000 };
   assert.equal(shouldSendAutoYes(previous, "1. Yes", 5_000), false);
+  assert.equal(shouldSendAutoYes(previous, "different prompt", 5_000), false);
   assert.equal(shouldSendAutoYes(previous, "1. Yes", 11_000), true);
-  assert.equal(shouldSendAutoYes(previous, "different prompt", 1_001), true);
+  assert.equal(shouldSendAutoYes(previous, "different prompt", 11_000), true);
 });

@@ -30,18 +30,26 @@ test("session agent exposes only Session Gateway tools and returns session lists
       "assign_session_to_room",
       "create_room",
       "create_session",
+      "create_workflow_run",
+      "get_workflow_supervisor",
       "get_room",
       "get_session_output",
       "list_room_messages",
       "list_rooms",
       "list_sessions",
+      "list_workflows",
+      "list_workflow_templates",
       "restart_session",
       "send_keys_to_session",
       "send_room_message",
       "send_to_session",
+      "setup_workflow_room",
+      "start_workflow_run",
       "stop_session",
       "summarize_session_states",
-      "switch_session"
+      "switch_session",
+      "tick_workflow_supervisor",
+      "update_workflow_supervisor_policy"
     ].sort()
   );
   assert.equal(fake.state.tools.some((tool) => /shell|file|search|delete/i.test(tool.name)), false);
@@ -159,6 +167,57 @@ test("session agent confirmation can send Enter through the key tool", async () 
   assert.equal(result.session.name, "test2");
 });
 
+test("session agent exposes PM supervisor workflow tools", async () => {
+  const calls = [];
+  const fake = createFakeAgent(async (agent, emit) => {
+    const statusTool = agent.state.tools.find((entry) => entry.name === "get_workflow_supervisor");
+    const status = await statusTool.execute("tool-1", { runId: "run-1" });
+    emit({ type: "tool_execution_end", toolName: statusTool.name, result: status, isError: false });
+
+    const policyTool = agent.state.tools.find((entry) => entry.name === "update_workflow_supervisor_policy");
+    const policy = await policyTool.execute("tool-2", {
+      runId: "run-1",
+      pmAgentEnabled: true,
+      stallMs: 300000,
+      maxInterventionsPerAssignment: 2
+    });
+    emit({ type: "tool_execution_end", toolName: policyTool.name, result: policy, isError: false });
+
+    agent.state.messages.push({
+      role: "assistant",
+      content: [{ type: "text", text: "已查看 run-1 的 PM 监督状态，并把卡住判定调整为 5 分钟。" }]
+    });
+  });
+  const manager = createSessionAgentManager(
+    { config: { runtimeSettings: { sessionAgent: {} } } },
+    createOperations({
+      async get_workflow_supervisor(params) {
+        calls.push(["get", params]);
+        return {
+          workflow: { id: "run-1", status: "executing" },
+          supervisor: { enabled: true, observations: [], interventions: [] }
+        };
+      },
+      async update_workflow_supervisor_policy(params) {
+        calls.push(["update", params]);
+        return {
+          workflow: { id: "run-1", status: "executing" },
+          supervisor: { options: { pmAgentEnabled: true, stallMs: 300000, maxInterventionsPerAssignment: 2 } }
+        };
+      }
+    }),
+    { agent: fake }
+  );
+
+  const result = await manager.run("检查 run-1 的 PM 监督状态，并把卡住判定改成 5 分钟", {});
+
+  assert.equal(result.answer, "已查看 run-1 的 PM 监督状态，并把卡住判定调整为 5 分钟。");
+  assert.deepEqual(calls, [
+    ["get", { runId: "run-1" }],
+    ["update", { runId: "run-1", pmAgentEnabled: true, stallMs: 300000, maxInterventionsPerAssignment: 2 }]
+  ]);
+});
+
 function createOperations(overrides = {}) {
   return {
     setCurrentRequest() {},
@@ -206,6 +265,30 @@ function createOperations(overrides = {}) {
     },
     async list_room_messages() {
       return { room: null, messages: [] };
+    },
+    async list_workflow_templates() {
+      return { templates: [] };
+    },
+    async list_workflows() {
+      return { workflows: [] };
+    },
+    async create_workflow_run() {
+      return { workflow: null, room: null };
+    },
+    async start_workflow_run() {
+      return { workflow: null };
+    },
+    async get_workflow_supervisor() {
+      return { workflow: null, supervisor: null };
+    },
+    async tick_workflow_supervisor() {
+      return { workflow: null, result: null };
+    },
+    async update_workflow_supervisor_policy() {
+      return { workflow: null, supervisor: null };
+    },
+    async setup_workflow_room() {
+      return { room: null, sessions: [], workflow: null };
     },
     ...overrides
   };

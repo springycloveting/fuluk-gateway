@@ -300,3 +300,206 @@ test("TmuxBackend resize updates the tmux window size", async () => {
     }
   ]);
 });
+
+test("TmuxBackend capture only falls back to alternate screen when current pane is empty", async () => {
+  const calls = [];
+  const outputs = ["   ", "\u001b[31malternate\u001b[0m"];
+  const tmux = new TmuxBackend(
+    {
+      defaultRuntimeCommand: "/bin/bash",
+      cliCommands: {}
+    },
+    {
+      run: async (command, args, timeoutMs) => {
+        calls.push({ command, args, timeoutMs });
+        return { stdout: args[0] === "capture-pane" ? outputs.shift() ?? "" : "" };
+      }
+    }
+  );
+
+  const output = await tmux.capture(
+    {
+      id: "session-1",
+      kind: "opencode",
+      tmuxSessionName: "opencode-work"
+    },
+    300,
+    { preserveEscapes: true, alternateScreen: true }
+  );
+
+  assert.equal(output, "\u001b[31malternate\u001b[0m");
+  assert.deepEqual(calls.filter((call) => call.args[0] === "capture-pane").map((call) => call.args[1]), ["-ept", "-eapt"]);
+});
+
+test("TmuxBackend capture can read a scrolled history window", async () => {
+  const calls = [];
+  const tmux = new TmuxBackend(
+    {
+      defaultRuntimeCommand: "/bin/bash",
+      cliCommands: {}
+    },
+    {
+      run: async (command, args, timeoutMs) => {
+        calls.push({ command, args, timeoutMs });
+        return { stdout: "history window" };
+      }
+    }
+  );
+
+  const output = await tmux.capture(
+    {
+      id: "session-1",
+      kind: "opencode",
+      tmuxSessionName: "opencode-work"
+    },
+    80,
+    { offset: 40 }
+  );
+
+  assert.equal(output, "history window");
+  assert.deepEqual(calls, [
+    {
+      command: "tmux",
+      args: ["has-session", "-t", "=opencode-work"],
+      timeoutMs: 3000
+    },
+    {
+      command: "tmux",
+      args: ["capture-pane", "-pt", "=opencode-work:", "-S", "-120", "-E", "-40"],
+      timeoutMs: undefined
+    }
+  ]);
+});
+
+test("TmuxBackend capture can preserve terminal escapes and alternate screen", async () => {
+  const calls = [];
+  const tmux = new TmuxBackend(
+    {
+      defaultRuntimeCommand: "/bin/bash",
+      cliCommands: {}
+    },
+    {
+      run: async (command, args, timeoutMs) => {
+        calls.push({ command, args, timeoutMs });
+        return { stdout: "\u001b[32mmenu\u001b[0m" };
+      }
+    }
+  );
+
+  const output = await tmux.capture(
+    {
+      id: "session-1",
+      kind: "opencode",
+      tmuxSessionName: "opencode-work"
+    },
+    300,
+    { preserveEscapes: true, alternateScreen: true }
+  );
+
+  assert.equal(output, "\u001b[32mmenu\u001b[0m");
+  assert.deepEqual(calls, [
+    {
+      command: "tmux",
+      args: ["has-session", "-t", "=opencode-work"],
+      timeoutMs: 3000
+    },
+    {
+      command: "tmux",
+      args: ["capture-pane", "-ept", "=opencode-work:", "-S", "-300"],
+      timeoutMs: undefined
+    }
+  ]);
+});
+
+test("TmuxBackend sendKeys translates wheel keys into SGR mouse sequences at pane center", async () => {
+  const calls = [];
+  const tmux = new TmuxBackend(
+    {
+      defaultRuntimeCommand: "/bin/bash",
+      cliCommands: {}
+    },
+    {
+      run: async (command, args, timeoutMs) => {
+        calls.push({ command, args, timeoutMs });
+        if (args[0] === "display-message") return { stdout: "120,40" };
+        return { stdout: "" };
+      }
+    }
+  );
+
+  await tmux.sendKeys(
+    {
+      id: "session-1",
+      kind: "opencode",
+      tmuxSessionName: "opencode-work"
+    },
+    ["WheelUpPane"]
+  );
+
+  assert.deepEqual(calls, [
+    {
+      command: "tmux",
+      args: ["has-session", "-t", "=opencode-work"],
+      timeoutMs: 3000
+    },
+    {
+      command: "tmux",
+      args: ["display-message", "-p", "-t", "=opencode-work:", "#{pane_width},#{pane_height}"],
+      timeoutMs: undefined
+    },
+    {
+      command: "tmux",
+      args: ["send-keys", "-t", "=opencode-work:", "-l", "--", "\u001b[<64;61;21M"],
+      timeoutMs: undefined
+    }
+  ]);
+});
+
+test("TmuxBackend sendKeys splits plain keys and wheel keys into separate tmux calls", async () => {
+  const calls = [];
+  const tmux = new TmuxBackend(
+    {
+      defaultRuntimeCommand: "/bin/bash",
+      cliCommands: {}
+    },
+    {
+      run: async (command, args, timeoutMs) => {
+        calls.push({ command, args, timeoutMs });
+        if (args[0] === "display-message") return { stdout: "100,30" };
+        return { stdout: "" };
+      }
+    }
+  );
+
+  await tmux.sendKeys(
+    {
+      id: "session-1",
+      kind: "opencode",
+      tmuxSessionName: "opencode-work"
+    },
+    ["WheelDownPane", "Enter"]
+  );
+
+  assert.deepEqual(calls, [
+    {
+      command: "tmux",
+      args: ["has-session", "-t", "=opencode-work"],
+      timeoutMs: 3000
+    },
+    {
+      command: "tmux",
+      args: ["send-keys", "-t", "=opencode-work:", "Enter"],
+      timeoutMs: undefined
+    },
+    {
+      command: "tmux",
+      args: ["display-message", "-p", "-t", "=opencode-work:", "#{pane_width},#{pane_height}"],
+      timeoutMs: undefined
+    },
+    {
+      command: "tmux",
+      args: ["send-keys", "-t", "=opencode-work:", "-l", "--", "\u001b[<65;51;16M"],
+      timeoutMs: undefined
+    }
+  ]);
+});

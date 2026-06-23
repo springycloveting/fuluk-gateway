@@ -11,3 +11,10 @@ HANDOFF.md
 session-gateway-handoff.md
 TODO.md
 AI_CLI_Session_Manager_v1_Plan.md
+# Internal development handoff documents
+*handoff*.md
+PM_ROOM_HARNESS_HANDOFF.md
+fuluk-pi-workflow-setup-handoff.md
+# Internal development docs
+docs/pm-room-harness-*.md
+docs/tui-web-rendering-plans.md

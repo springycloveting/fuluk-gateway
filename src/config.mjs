@@ -13,6 +13,8 @@ export function loadConfig() {
   const settingsPath =
     process.env.SESSION_GATEWAY_SETTINGS ??
     path.resolve(process.cwd(), "data", "session-gateway-settings.json");
+  const runtimeSettingsEnabled = fs.existsSync(settingsPath);
+  const runtimeSettings = loadRuntimeSettings(settingsPath);
 
   const authToken = loadAuthToken();
 
@@ -22,8 +24,8 @@ export function loadConfig() {
     authToken,
     allowRuntimeMode: process.env.SESSION_GATEWAY_ALLOW_RUNTIME === "true",
     settingsPath,
-    runtimeSettingsEnabled: fs.existsSync(settingsPath),
-    runtimeSettings: loadRuntimeSettings(settingsPath),
+    runtimeSettingsEnabled,
+    runtimeSettings,
     notificationWebhookUrl: process.env.SESSION_GATEWAY_WEBHOOK_URL ?? "",
     databasePath:
       process.env.SESSION_GATEWAY_DB ??
@@ -33,6 +35,34 @@ export function loadConfig() {
       "/home/v6/work/CodeClip/data/sessions",
     defaultRuntimeCommand: process.env.SESSION_GATEWAY_RUNTIME ?? "/bin/bash",
     notificationPollMs: parsePositiveInt(process.env.SESSION_GATEWAY_NOTIFICATION_POLL_MS, 5_000),
+    workflowSupervisorEnabled: process.env.SESSION_GATEWAY_WORKFLOW_SUPERVISOR_ENABLED !== "false",
+    workflowSupervisorIntervalMs: parsePositiveInt(
+      process.env.SESSION_GATEWAY_WORKFLOW_SUPERVISOR_INTERVAL_MS,
+      runtimeSettings.workflowSupervisor?.intervalMs ?? 60_000
+    ),
+    workflowSupervisorStallMs: parsePositiveInt(
+      process.env.SESSION_GATEWAY_WORKFLOW_SUPERVISOR_STALL_MS,
+      runtimeSettings.workflowSupervisor?.stallMs ?? 15 * 60_000
+    ),
+    workflowSupervisorHardTimeoutMs: parsePositiveInt(
+      process.env.SESSION_GATEWAY_WORKFLOW_SUPERVISOR_HARD_TIMEOUT_MS,
+      runtimeSettings.workflowSupervisor?.hardTimeoutMs ?? 60 * 60_000
+    ),
+    workflowSupervisorCooldownMs: parsePositiveInt(
+      process.env.SESSION_GATEWAY_WORKFLOW_SUPERVISOR_COOLDOWN_MS,
+      runtimeSettings.workflowSupervisor?.sameActionCooldownMs ?? 10 * 60_000
+    ),
+    workflowSupervisorMaxInterventions: parsePositiveInt(
+      process.env.SESSION_GATEWAY_WORKFLOW_SUPERVISOR_MAX_INTERVENTIONS,
+      runtimeSettings.workflowSupervisor?.maxInterventionsPerAssignment ?? 3
+    ),
+    workflowSupervisorMaxSpawnedAgents: parsePositiveInt(
+      process.env.SESSION_GATEWAY_WORKFLOW_SUPERVISOR_MAX_SPAWNED_AGENTS,
+      runtimeSettings.workflowSupervisor?.maxSpawnedAgentsPerRoom ?? 3
+    ),
+    workflowSupervisorPmEnabled:
+      process.env.SESSION_GATEWAY_WORKFLOW_SUPERVISOR_PM_ENABLED === "true" ||
+      Boolean(runtimeSettings.workflowSupervisor?.pmAgentEnabled),
     submitKeyDelayMs: parsePositiveInt(process.env.SESSION_GATEWAY_SUBMIT_KEY_DELAY_MS, 80),
     cliStartupDelayMs: parsePositiveInt(process.env.SESSION_GATEWAY_CLI_STARTUP_DELAY_MS, 3000),
     submitKeys: {
@@ -59,6 +89,7 @@ export function updateRuntimeSettings(config, input) {
   fs.writeFileSync(config.settingsPath, `${JSON.stringify(next, null, 2)}\n`);
   config.runtimeSettingsEnabled = true;
   config.runtimeSettings = next;
+  config.workflowSupervisorPmEnabled = Boolean(next.workflowSupervisor?.pmAgentEnabled);
   return next;
 }
 
@@ -81,7 +112,21 @@ export function normalizeRuntimeSettings(input = {}) {
     cliDeployment,
     commandParser: normalizeCommandParser(input.commandParser),
     notifications: normalizeNotifications(input.notifications),
-    sessionAgent: normalizeSessionAgent(input.sessionAgent)
+    sessionAgent: normalizeSessionAgent(input.sessionAgent),
+    workflowSupervisor: normalizeWorkflowSupervisor(input.workflowSupervisor)
+  };
+}
+
+function normalizeWorkflowSupervisor(input = {}) {
+  const current = input && typeof input === "object" ? input : {};
+  return {
+    pmAgentEnabled: Boolean(current.pmAgentEnabled),
+    intervalMs: positiveNumber(current.intervalMs, 60_000),
+    stallMs: positiveNumber(current.stallMs, 15 * 60_000),
+    hardTimeoutMs: positiveNumber(current.hardTimeoutMs, 60 * 60_000),
+    sameActionCooldownMs: positiveNumber(current.sameActionCooldownMs, 10 * 60_000),
+    maxInterventionsPerAssignment: positiveNumber(current.maxInterventionsPerAssignment, 3),
+    maxSpawnedAgentsPerRoom: positiveNumber(current.maxSpawnedAgentsPerRoom, 3)
   };
 }
 

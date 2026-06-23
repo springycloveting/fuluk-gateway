@@ -5,6 +5,7 @@ export function canAutoYesSession(sessions, selectedSessionId, targetSessionId, 
 }
 
 export function shouldSendAutoYes(previous, signature, now = Date.now(), cooldownMs = 10_000) {
-  if (!previous || previous.signature !== signature) return true;
-  return now - previous.sentAt >= cooldownMs;
+  if (!previous) return true;
+  if (now - previous.sentAt < cooldownMs) return false;
+  return previous.signature !== signature || now - previous.sentAt >= cooldownMs;
 }

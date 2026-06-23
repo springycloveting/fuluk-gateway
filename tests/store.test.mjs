@@ -292,3 +292,101 @@ test("SessionStore persists custom workflow templates and snapshots them into ru
   assert.equal(store.deleteWorkflowTemplate(template.id), true);
   store.close();
 });
+
+test("SessionStore persists workflow supervisor observations, interventions, and leases", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-supervisor-store-"));
+  const store = new SessionStore(path.join(dir, "test.sqlite"));
+  const planner = store.create({ kind: "runtime", cwd: dir, name: "planner" }, "/bin/bash", []);
+  const room = store.createRoom({ name: "supervisor-room" });
+  store.assignSessionToRoom(room.id, planner.id, "planner");
+  const workflow = store.startWorkflowRun(
+    store.createWorkflowRun({ roomId: room.id, objective: "Ship supervised workflow" }).id,
+    { eventKey: "supervisor:start" }
+  );
+
+  assert.equal(store.listActiveWorkflowRuns().some((run) => run.id === workflow.id), true);
+
+  const observation = store.createWorkflowObservation({
+    runId: workflow.id,
+    tickId: "tick-1",
+    snapshot: { workflow: { id: workflow.id } },
+    detectedIssues: [{ type: "stalled_assignment" }]
+  });
+  assert.equal(observation.roomId, room.id);
+  assert.equal(observation.snapshot.workflow.id, workflow.id);
+  assert.equal(store.listWorkflowObservations(workflow.id).length, 1);
+
+  const assignment = workflow.runAssignments[0];
+  const intervention = store.createWorkflowIntervention({
+    runId: workflow.id,
+    observationId: observation.id,
+    actionType: "remind",
+    assignmentId: assignment.id,
+    targetSessionId: planner.id,
+    reason: "no callback"
+  });
+  assert.equal(intervention.validationStatus, "accepted");
+  assert.equal(store.findRecentWorkflowIntervention({
+    runId: workflow.id,
+    actionType: "remind",
+    assignmentId: assignment.id,
+    sinceIso: "2000-01-01T00:00:00.000Z"
+  }).id, intervention.id);
+
+  const lease = store.acquireWorkflowSupervisorLease(
+    workflow.id,
+    "owner-1",
+    "2099-01-01T00:00:00.000Z",
+    "2026-01-01T00:00:00.000Z"
+  );
+  assert.equal(lease.ownerId, "owner-1");
+  assert.equal(
+    store.acquireWorkflowSupervisorLease(
+      workflow.id,
+      "owner-2",
+      "2099-01-01T00:00:00.000Z",
+      "2026-01-01T00:00:00.000Z"
+    ),
+    null
+  );
+  store.close();
+});
+
+test("SessionStore deletes workflow runs and supervisor records", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-gateway-workflow-delete-"));
+  const store = new SessionStore(path.join(dir, "test.sqlite"));
+  const planner = store.create({ kind: "runtime", cwd: dir, name: "planner" }, "/bin/bash", []);
+  const room = store.createRoom({ name: "delete-workflow-room" });
+  store.assignSessionToRoom(room.id, planner.id, "planner");
+  const workflow = store.startWorkflowRun(
+    store.createWorkflowRun({ roomId: room.id, objective: "Clean stuck workflow" }).id,
+    { eventKey: "delete:start" }
+  );
+  const assignment = workflow.runAssignments[0];
+  const observation = store.createWorkflowObservation({
+    runId: workflow.id,
+    detectedIssues: [{ type: "stalled_assignment" }]
+  });
+  store.createWorkflowIntervention({
+    runId: workflow.id,
+    observationId: observation.id,
+    actionType: "remind",
+    assignmentId: assignment.id,
+    targetSessionId: planner.id
+  });
+  store.acquireWorkflowSupervisorLease(
+    workflow.id,
+    "owner-1",
+    "2099-01-01T00:00:00.000Z",
+    "2026-01-01T00:00:00.000Z"
+  );
+
+  assert.equal(store.deleteWorkflowRun(workflow.id), true);
+  assert.equal(store.getWorkflowRun(workflow.id), null);
+  assert.equal(store.listWorkflowRuns(room.id).length, 0);
+  assert.equal(store.listWorkflowObservations(workflow.id).length, 0);
+  assert.equal(store.listWorkflowInterventions(workflow.id).length, 0);
+  assert.equal(store.getWorkflowSupervisorLease(workflow.id), null);
+  assert.equal(store.deleteWorkflowRun(workflow.id), false);
+  store.close();
+});

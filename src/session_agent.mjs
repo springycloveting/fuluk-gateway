@@ -22,6 +22,20 @@ const SYSTEM_PROMPT = [
   "- Use list_room_messages to see the message history in a room.",
   "- When the user asks to coordinate sessions or run multi-agent workflows, suggest using rooms.",
   "",
+  "Workflow capabilities:",
+  "- Use setup_workflow_room to create a complete workflow environment with room, role-assigned sessions, and workflow run in one call.",
+  "- Use list_workflow_templates to see available workflow templates.",
+  "- Use list_workflows to inspect workflow runs in a room or active workflow runs globally.",
+  "- Use create_workflow_run to create a workflow in an existing room.",
+  "- Use start_workflow_run to start workflow execution.",
+  "- Use get_workflow_supervisor to inspect PM supervision observations, issues, and interventions.",
+  "- Use tick_workflow_supervisor when the user asks to supervise/check a workflow immediately.",
+  "- Use update_workflow_supervisor_policy to tune PM supervision policy such as stall timeout, cooldown, intervention budget, and PM Agent enablement.",
+  "- When user mentions '非docker模式', '主机模式', or 'host模式', set deploymentMode to 'host'.",
+  "- When user specifies role kinds like 'coder用claude' or 'planner用codex', create sessions with matching kind.",
+  "- When user provides project folder path, use it as project (cwd) for all sessions.",
+  "- When user describes a task goal after '任务目标是' or similar, use it as the workflow objective.",
+  "",
   "Never answer only with generic text such as '操作已完成' when backend output is available. Use the backend output to answer the user's actual request.",
   "Keep final answers concise and mention the concrete sessions you acted on.",
   "IMPORTANT: Be extremely concise. Answer in 1-3 sentences max. No explanations or elaborations unless explicitly asked. Direct answers only."
@@ -31,8 +45,41 @@ export function createSessionAgentManager(context, operations, options = {}) {
   let agent = options.agent ?? null;
   let modelKey = "";
 
+  function getEffectiveSettings() {
+    const sessionAgent = context.config.runtimeSettings?.sessionAgent ?? {};
+    const commandParser = context.config.runtimeSettings?.commandParser ?? {};
+    // Use sessionAgent settings if model is configured, otherwise fall back to commandParser
+    if (sessionAgent.model && sessionAgent.model.trim()) {
+      return sessionAgent;
+    }
+    // Convert commandParser settings to sessionAgent format
+    // commandParser uses baseUrl + model, sessionAgent uses provider:model format
+    // We create a custom "openai:command-parser" model entry
+    const baseUrl = commandParser.baseUrl || "";
+    const modelId = commandParser.model || "";
+    const apiKey = commandParser.apiKey || "";
+    if (!baseUrl || !modelId || !apiKey) {
+      return { model: "", apiKey: "", models: {} };
+    }
+    return {
+      model: "openai:command-parser",
+      apiKey,
+      models: {
+        openai: {
+          "command-parser": {
+            api: "openai-completions",
+            provider: "openai",
+            baseUrl,
+            id: modelId,
+            name: modelId
+          }
+        }
+      }
+    };
+  }
+
   async function buildAgent() {
-    const settings = context.config.runtimeSettings?.sessionAgent ?? {};
+    const settings = getEffectiveSettings();
     const resolved = resolveSessionAgentModel(settings);
     const tools = createSessionAgentTools(operations);
     modelKey = settingsKey(settings);
@@ -57,7 +104,7 @@ export function createSessionAgentManager(context, operations, options = {}) {
 
   async function getAgent() {
     if (options.agent) return options.agent;
-    const settings = context.config.runtimeSettings?.sessionAgent ?? {};
+    const settings = getEffectiveSettings();
     const nextKey = settingsKey(settings);
     if (!agent || nextKey !== modelKey || settings.resetOnConfigChange) return buildAgent();
     return agent;
@@ -101,7 +148,18 @@ export function createSessionAgentManager(context, operations, options = {}) {
 }
 
 async function synthesizeBackendOutput(agent, text, request, actions) {
-  return;
+  if (!shouldSendBackendOutputToWebPi(text, actions, agent)) return;
+  const previousTools = agent.state?.tools;
+  if (agent.state && typeof previousTools !== "undefined") {
+    agent.state.tools = [];
+  }
+  try {
+    await agent.prompt(buildBackendOutputPrompt(text, request, actions));
+  } finally {
+    if (agent.state && typeof previousTools !== "undefined") {
+      agent.state.tools = previousTools;
+    }
+  }
 }
 
 function createSessionAgentTools(operations) {
@@ -169,7 +227,57 @@ function createSessionAgentTools(operations) {
       roomId: Type.Optional(Type.String()),
       roomName: Type.Optional(Type.String()),
       limit: Type.Optional(Type.Number({ minimum: 1, maximum: 500 }))
-    }, operations.list_room_messages)
+    }, operations.list_room_messages),
+    tool("List Workflow Templates", "list_workflow_templates", "List available workflow templates for creating workflow runs.", {}, operations.list_workflow_templates),
+    tool("List Workflows", "list_workflows", "List workflow runs in a room, or active workflow runs when no room is specified.", {
+      roomId: Type.Optional(Type.String()),
+      roomName: Type.Optional(Type.String()),
+      activeOnly: Type.Optional(Type.Boolean())
+    }, operations.list_workflows),
+    tool("Create Workflow Run", "create_workflow_run", "Create a new workflow run in a room. Requires roomId and objective.", {
+      roomId: Type.Optional(Type.String()),
+      roomName: Type.Optional(Type.String()),
+      objective: Type.String({ minLength: 1 }),
+      templateId: Type.Optional(Type.String())
+    }, operations.create_workflow_run),
+    tool("Start Workflow Run", "start_workflow_run", "Start a workflow run to begin task assignment and execution.", {
+      runId: Type.Optional(Type.String()),
+      runName: Type.Optional(Type.String()),
+      eventKey: Type.Optional(Type.String())
+    }, operations.start_workflow_run),
+    tool("Get Workflow Supervisor", "get_workflow_supervisor", "Read PM supervision status, observations, detected issues, and interventions for a workflow.", {
+      runId: Type.String({ minLength: 1 })
+    }, operations.get_workflow_supervisor),
+    tool("Tick Workflow Supervisor", "tick_workflow_supervisor", "Run PM supervision once for a workflow now.", {
+      runId: Type.String({ minLength: 1 })
+    }, operations.tick_workflow_supervisor),
+    tool("Update Workflow Supervisor Policy", "update_workflow_supervisor_policy", "Update PM supervision runtime policy. Durations are milliseconds.", {
+      runId: Type.String({ minLength: 1 }),
+      pmAgentEnabled: Type.Optional(Type.Boolean()),
+      intervalMs: Type.Optional(Type.Number({ minimum: 0 })),
+      stallMs: Type.Optional(Type.Number({ minimum: 0 })),
+      hardTimeoutMs: Type.Optional(Type.Number({ minimum: 0 })),
+      sameActionCooldownMs: Type.Optional(Type.Number({ minimum: 0 })),
+      maxInterventionsPerAssignment: Type.Optional(Type.Number({ minimum: 0 })),
+      maxSpawnedAgentsPerRoom: Type.Optional(Type.Number({ minimum: 0 }))
+    }, operations.update_workflow_supervisor_policy),
+    tool("Setup Workflow Room", "setup_workflow_room", "Create a complete workflow environment with room, role sessions, and workflow run. Use this when user wants to set up a multi-agent workflow project with specific roles and session kinds.", {
+      project: Type.Optional(Type.String({ description: "Project directory path" })),
+      objective: Type.String({ minLength: 1, description: "Workflow objective/task goal" }),
+      roomId: Type.Optional(Type.String()),
+      roomName: Type.Optional(Type.String()),
+      roles: Type.Array(Type.Object({
+        name: Type.String({ description: "Role name: coder, planner, tester, testerall, etc." }),
+        kind: Type.Optional(Type.String({ description: "Session kind: claude, codex, opencode, pi-os, runtime" })),
+        deploymentMode: Type.Optional(Type.String({ description: "host or docker" })),
+        dockerName: Type.Optional(Type.String()),
+        rolePrompt: Type.Optional(Type.String()),
+        rolePresetId: Type.Optional(Type.String()),
+        injectRolePrompt: Type.Optional(Type.Boolean())
+      }), { minItems: 1 }),
+      templateId: Type.Optional(Type.String()),
+      autoStart: Type.Optional(Type.Boolean({ description: "Auto-start workflow after creation (default: true)" }))
+    }, operations.setup_workflow_room)
   ];
 }
 
@@ -219,6 +327,7 @@ function buildRoomContextPrompt(roomContext) {
     "",
     "## Room Context (Group Chat Mode)",
     `You are operating as the room assistant for room "${roomContext.roomName}".`,
+    `Current room ID: ${roomContext.roomId}`,
   ];
   if (roomContext.project) lines.push(`Project: ${roomContext.project}`);
   if (roomContext.objective) lines.push(`Objective: ${roomContext.objective}`);
@@ -233,7 +342,8 @@ function buildRoomContextPrompt(roomContext) {
     lines.push("");
     lines.push("When the user asks to send a task or message to the room, use send_room_message.");
     lines.push("When the user asks to assign a role, use assign_session_to_room.");
-    lines.push("Prefer using room-scoped operations over individual session operations.");
+    lines.push("When the user asks to CREATE A NEW WORKFLOW with specific roles and session kinds, use setup_workflow_room.");
+    lines.push("IMPORTANT: If user says '创建一个工作流' with roles like 'coder用claude', 'planner用...' - this is a workflow setup request, use setup_workflow_room with the current roomId to create a workflow run in this room.");
   }
   return lines.join("\n");
 }
