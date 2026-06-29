@@ -1,3 +1,73 @@
+// AudioConverter: 将音频转换为 WAV 格式
+class AudioConverter {
+  // 将音频 Blob 转换为 WAV 格式
+  static async convertToWav(audioBlob) {
+    const arrayBuffer = await audioBlob.arrayBuffer();
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+    const wavBlob = this.createWavBlob(audioBuffer);
+    audioContext.close();
+    return wavBlob;
+  }
+
+  // 创建 WAV Blob
+  static createWavBlob(audioBuffer) {
+    const numChannels = audioBuffer.numberOfChannels;
+    const sampleRate = audioBuffer.sampleRate;
+    const format = 1; // PCM
+    const bitDepth = 16;
+
+    const bytesPerSample = bitDepth / 8;
+    const blockAlign = numChannels * bytesPerSample;
+
+    const dataLength = audioBuffer.length * blockAlign;
+    const bufferLength = 44 + dataLength;
+
+    const arrayBuffer = new ArrayBuffer(bufferLength);
+    const view = new DataView(arrayBuffer);
+
+    // WAV header
+    this.writeString(view, 0, 'RIFF');
+    view.setUint32(4, bufferLength - 8, true);
+    this.writeString(view, 8, 'WAVE');
+    this.writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true); // fmt chunk size
+    view.setUint16(20, format, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * blockAlign, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitDepth, true);
+    this.writeString(view, 36, 'data');
+    view.setUint32(40, dataLength, true);
+
+    // Write audio data
+    const channels = [];
+    for (let i = 0; i < numChannels; i++) {
+      channels.push(audioBuffer.getChannelData(i));
+    }
+
+    let offset = 44;
+    for (let i = 0; i < audioBuffer.length; i++) {
+      for (let ch = 0; ch < numChannels; ch++) {
+        const sample = Math.max(-1, Math.min(1, channels[ch][i]));
+        const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+        view.setInt16(offset, intSample, true);
+        offset += 2;
+      }
+    }
+
+    return new Blob([arrayBuffer], { type: 'audio/wav' });
+  }
+
+  static writeString(view, offset, string) {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
+    }
+  }
+}
+
 // VoiceRecorder: 管理麦克风录音
 class VoiceRecorder {
   constructor() {
@@ -107,8 +177,17 @@ class ASRClient {
 
   // 发送音频进行识别
   async transcribe(audioBlob) {
+    // 转换为 WAV 格式
+    let wavBlob;
+    try {
+      wavBlob = await AudioConverter.convertToWav(audioBlob);
+    } catch (convertError) {
+      console.warn('WAV conversion failed, using original format:', convertError);
+      wavBlob = audioBlob;
+    }
+
     const formData = new FormData();
-    formData.append('file', audioBlob, 'recording.webm');
+    formData.append('file', wavBlob, 'recording.wav');
     formData.append('model', this.model);
 
     const controller = new AbortController();
@@ -357,21 +436,68 @@ class VoicePage {
     // 状态
     this.state = 'idle'; // idle | recording | processing | speaking
 
+    // 加载设置
+    this.settings = this.loadSettings();
+
     // DOM 元素
     this.messagesContainer = document.getElementById('voice-messages');
     this.voiceBtn = document.getElementById('voice-btn');
     this.voiceStatus = document.getElementById('voice-status');
     this.clearBtn = document.getElementById('clear-chat');
+    this.openSettingsBtn = document.getElementById('open-settings');
+    this.settingsDialog = document.getElementById('settings-dialog');
+    this.settingsForm = document.getElementById('settings-form');
+    this.settingsToken = document.getElementById('settings-token');
+    this.settingsAsrUrl = document.getElementById('settings-asr-url');
+    this.settingsAsrModel = document.getElementById('settings-asr-model');
 
     // 组件
     this.recorder = new VoiceRecorder();
-    this.asrClient = new ASRClient();
+    this.asrClient = new ASRClient({
+      apiUrl: this.settings.asrUrl,
+      model: this.settings.asrModel
+    });
     this.ttsPlayer = new TTSPlayer();
-    this.assistantClient = new AssistantClient();
+    this.assistantClient = new AssistantClient({
+      getToken: () => this.settings.token
+    });
     this.chatUI = new ChatUI(this.messagesContainer);
+
+    // 初始化设置表单
+    this.initSettingsForm();
 
     // 绑定事件
     this.bindEvents();
+  }
+
+  loadSettings() {
+    const stored = localStorage.getItem('voiceAssistantSettings');
+    if (stored) {
+      try {
+        return JSON.parse(stored);
+      } catch (e) {
+        console.warn('Failed to parse voice settings:', e);
+      }
+    }
+    return {
+      token: localStorage.getItem('sessionGatewayToken') || '',
+      asrUrl: 'http://127.0.0.1:8003/v1/audio/transcriptions',
+      asrModel: 'Qwen3-ASR-1.7b-Q4_K_M.gguf'
+    };
+  }
+
+  saveSettings() {
+    localStorage.setItem('voiceAssistantSettings', JSON.stringify(this.settings));
+    // 同步到 sessionGatewayToken
+    if (this.settings.token) {
+      localStorage.setItem('sessionGatewayToken', this.settings.token);
+    }
+  }
+
+  initSettingsForm() {
+    this.settingsToken.value = this.settings.token;
+    this.settingsAsrUrl.value = this.settings.asrUrl;
+    this.settingsAsrModel.value = this.settings.asrModel;
   }
 
   bindEvents() {
@@ -383,6 +509,35 @@ class VoicePage {
       this.ttsPlayer.stop();
       this.chatUI.clear();
       this.setState('idle');
+    });
+
+    // 打开设置
+    this.openSettingsBtn.addEventListener('click', () => {
+      this.settingsDialog.showModal();
+    });
+
+    // 保存设置
+    this.settingsForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      this.settings.token = this.settingsToken.value.trim();
+      this.settings.asrUrl = this.settingsAsrUrl.value.trim() || 'http://127.0.0.1:8003/v1/audio/transcriptions';
+      this.settings.asrModel = this.settingsAsrModel.value.trim() || 'Qwen3-ASR-1.7b-Q4_K_M.gguf';
+      this.saveSettings();
+
+      // 更新 ASR 客户端配置
+      this.asrClient = new ASRClient({
+        apiUrl: this.settings.asrUrl,
+        model: this.settings.asrModel
+      });
+
+      this.settingsDialog.close();
+    });
+
+    // 关闭设置对话框
+    this.settingsDialog.addEventListener('click', (e) => {
+      if (e.target === this.settingsDialog) {
+        this.settingsDialog.close();
+      }
     });
 
     // 重新朗读按钮（事件委托）

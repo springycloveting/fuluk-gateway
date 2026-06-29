@@ -12,7 +12,8 @@
         <a href="/" class="ghost">← 返回</a>
         <h1>语音助手</h1>
         <div class="voice-header-actions">
-          <button id="clear-chat" class="ghost" type="button">清空对话</button>
+          <button id="open-settings" class="ghost" type="button">设置</button>
+          <button id="clear-chat" class="ghost" type="button">清空</button>
         </div>
       </header>
 
@@ -28,6 +29,28 @@
         </button>
       </section>
     </main>
+
+    <dialog id="settings-dialog">
+      <form id="settings-form" class="dialog-form">
+        <div class="dialog-head">
+          <h2>设置</h2>
+          <button class="ghost" type="button" data-close-dialog="settings-dialog">关闭</button>
+        </div>
+        <label>
+          <span>Bearer Token</span>
+          <input id="settings-token" type="password" autocomplete="off" placeholder="SESSION_GATEWAY_TOKEN" />
+        </label>
+        <label>
+          <span>ASR API 地址</span>
+          <input id="settings-asr-url" placeholder="http://127.0.0.1:8003/v1/audio/transcriptions" />
+        </label>
+        <label>
+          <span>ASR 模型</span>
+          <input id="settings-asr-model" placeholder="Qwen3-ASR-1.7b-Q4_K_M.gguf" />
+        </label>
+        <button type="submit">保存</button>
+      </form>
+    </dialog>
 
     <script type="module" src="/voice.js"></script>
   </body>
