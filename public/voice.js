@@ -304,41 +304,21 @@ class TTSPlayer {
   }
 }
 
-// AssistantClient: 调用 /api/nl 与助手对话
+// AssistantClient: 调用 mobile-adapter 与助手对话
 class AssistantClient {
   constructor(options = {}) {
-    this.getToken = options.getToken || (() => localStorage.getItem('sessionGatewayToken') || '');
-    this.contextSent = false;
+    // 默认使用 mobile-adapter 的 /chat 接口
+    this.apiUrl = options.apiUrl || 'http://100.64.0.18:8789/chat';
   }
 
   // 发送消息给助手
   async chat(text) {
-    const token = this.getToken();
-    if (!token) {
-      throw new Error('No authentication token');
-    }
-
-    let finalText = text;
-
-    // 第一次对话时发送场景上下文
-    if (!this.contextSent) {
-      const contextPrefix = [
-        "[语音对话模式] 用户通过语音与 AI 编程助手交互。",
-        "Session Gateway 管理 AI CLI 会话（codex/claude/opencode/pi-os/runtime）。",
-        "你可以：创建/停止/重启会话、发送命令、查看输出、管理房间和工作流。",
-        "回复要简洁自然，适合语音朗读。用户说："
-      ].join(" ");
-      finalText = contextPrefix + text;
-      this.contextSent = true;
-    }
-
-    const response = await fetch('/api/nl', {
+    const response = await fetch(this.apiUrl, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
+        'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ text: finalText })
+      body: JSON.stringify({ text })
     });
 
     if (!response.ok) {
@@ -352,8 +332,8 @@ class AssistantClient {
     if (result.answer) {
       return result.answer;
     }
-    if (result.command && result.command.type === 'assistant') {
-      return result.answer || '操作已完成';
+    if (result.error) {
+      throw new Error(result.error);
     }
     // 回退：尝试格式化整个结果
     return JSON.stringify(result, null, 2);
@@ -462,7 +442,7 @@ class VoicePage {
     this.openSettingsBtn = document.getElementById('open-settings');
     this.settingsDialog = document.getElementById('settings-dialog');
     this.settingsForm = document.getElementById('settings-form');
-    this.settingsToken = document.getElementById('settings-token');
+    this.settingsApiUrl = document.getElementById('settings-api-url');
     this.settingsAsrUrl = document.getElementById('settings-asr-url');
     this.settingsAsrModel = document.getElementById('settings-asr-model');
 
@@ -474,7 +454,7 @@ class VoicePage {
     });
     this.ttsPlayer = new TTSPlayer();
     this.assistantClient = new AssistantClient({
-      getToken: () => this.settings.token
+      apiUrl: this.settings.apiUrl
     });
     this.chatUI = new ChatUI(this.messagesContainer);
 
@@ -495,7 +475,7 @@ class VoicePage {
       }
     }
     return {
-      token: localStorage.getItem('sessionGatewayToken') || '',
+      apiUrl: 'http://100.64.0.18:8789/chat',
       asrUrl: 'http://127.0.0.1:8003/v1/audio/transcriptions',
       asrModel: 'Qwen3-ASR-1.7b-Q4_K_M.gguf'
     };
@@ -503,14 +483,10 @@ class VoicePage {
 
   saveSettings() {
     localStorage.setItem('voiceAssistantSettings', JSON.stringify(this.settings));
-    // 同步到 sessionGatewayToken
-    if (this.settings.token) {
-      localStorage.setItem('sessionGatewayToken', this.settings.token);
-    }
   }
 
   initSettingsForm() {
-    this.settingsToken.value = this.settings.token;
+    this.settingsApiUrl.value = this.settings.apiUrl;
     this.settingsAsrUrl.value = this.settings.asrUrl;
     this.settingsAsrModel.value = this.settings.asrModel;
   }
@@ -534,15 +510,18 @@ class VoicePage {
     // 保存设置
     this.settingsForm.addEventListener('submit', (e) => {
       e.preventDefault();
-      this.settings.token = this.settingsToken.value.trim();
+      this.settings.apiUrl = this.settingsApiUrl.value.trim() || 'http://100.64.0.18:8789/chat';
       this.settings.asrUrl = this.settingsAsrUrl.value.trim() || 'http://127.0.0.1:8003/v1/audio/transcriptions';
       this.settings.asrModel = this.settingsAsrModel.value.trim() || 'Qwen3-ASR-1.7b-Q4_K_M.gguf';
       this.saveSettings();
 
-      // 更新 ASR 客户端配置
+      // 更新客户端配置
       this.asrClient = new ASRClient({
         apiUrl: this.settings.asrUrl,
         model: this.settings.asrModel
+      });
+      this.assistantClient = new AssistantClient({
+        apiUrl: this.settings.apiUrl
       });
 
       this.settingsDialog.close();
