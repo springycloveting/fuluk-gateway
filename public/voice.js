@@ -308,6 +308,7 @@ class TTSPlayer {
 class AssistantClient {
   constructor(options = {}) {
     this.getToken = options.getToken || (() => localStorage.getItem('sessionGatewayToken') || '');
+    this.contextSent = false;
   }
 
   // 发送消息给助手
@@ -317,13 +318,27 @@ class AssistantClient {
       throw new Error('No authentication token');
     }
 
+    let finalText = text;
+
+    // 第一次对话时发送场景上下文
+    if (!this.contextSent) {
+      const contextPrefix = [
+        "[语音对话模式] 用户通过语音与 AI 编程助手交互。",
+        "Session Gateway 管理 AI CLI 会话（codex/claude/opencode/pi-os/runtime）。",
+        "你可以：创建/停止/重启会话、发送命令、查看输出、管理房间和工作流。",
+        "回复要简洁自然，适合语音朗读。用户说："
+      ].join(" ");
+      finalText = contextPrefix + text;
+      this.contextSent = true;
+    }
+
     const response = await fetch('/api/nl', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`
       },
-      body: JSON.stringify({ text })
+      body: JSON.stringify({ text: finalText })
     });
 
     if (!response.ok) {
