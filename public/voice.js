@@ -237,73 +237,6 @@ class ASRClient {
   }
 }
 
-// TTSPlayer: 使用 Web Speech API 朗读文本
-class TTSPlayer {
-  constructor(options = {}) {
-    this.lang = options.lang || 'zh-CN';
-    this.rate = options.rate || 1;
-    this.pitch = options.pitch || 1;
-    this.speaking = false;
-  }
-
-  // 检查浏览器支持
-  static isSupported() {
-    return 'speechSynthesis' in window;
-  }
-
-  // 朗读文本
-  speak(text) {
-    return new Promise((resolve, reject) => {
-      if (!TTSPlayer.isSupported()) {
-        reject(new Error('Speech synthesis not supported'));
-        return;
-      }
-
-      // 取消之前的朗读
-      window.speechSynthesis.cancel();
-
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = this.lang;
-      utterance.rate = this.rate;
-      utterance.pitch = this.pitch;
-
-      utterance.onstart = () => {
-        this.speaking = true;
-      };
-
-      utterance.onend = () => {
-        this.speaking = false;
-        resolve();
-      };
-
-      utterance.onerror = (event) => {
-        this.speaking = false;
-        // 忽略被取消的错误
-        if (event.error === 'canceled' || event.error === 'interrupted') {
-          resolve();
-        } else {
-          reject(new Error(`Speech error: ${event.error}`));
-        }
-      };
-
-      window.speechSynthesis.speak(utterance);
-    });
-  }
-
-  // 停止朗读
-  stop() {
-    if (TTSPlayer.isSupported()) {
-      window.speechSynthesis.cancel();
-    }
-    this.speaking = false;
-  }
-
-  // 检查是否正在朗读
-  isSpeaking() {
-    return this.speaking || (TTSPlayer.isSupported() && window.speechSynthesis.speaking);
-  }
-}
-
 // AssistantClient: 调用 mobile-adapter 与助手对话
 class AssistantClient {
   constructor(options = {}) {
@@ -382,12 +315,9 @@ class ChatUI {
       return;
     }
 
-    this.container.innerHTML = this.messages.map((msg, index) => {
+    this.container.innerHTML = this.messages.map((msg) => {
       const roleLabel = this.getRoleLabel(msg.role);
       const durationText = msg.duration ? `${msg.duration.toFixed(1)}s` : '';
-      const replayButton = msg.role === 'assistant'
-        ? `<button type="button" data-replay="${index}" class="ghost">重新朗读</button>`
-        : '';
 
       return `
         <div class="voice-message ${this.escapeHtml(msg.role)}">
@@ -396,7 +326,6 @@ class ChatUI {
             ${durationText ? `<span class="voice-message-duration">${this.escapeHtml(durationText)}</span>` : ''}
           </div>
           <div class="voice-message-text">${this.escapeHtml(msg.text)}</div>
-          ${replayButton ? `<div class="voice-message-actions">${replayButton}</div>` : ''}
         </div>
       `;
     }).join('');
@@ -429,7 +358,7 @@ class ChatUI {
 class VoicePage {
   constructor() {
     // 状态
-    this.state = 'idle'; // idle | recording | processing | speaking
+    this.state = 'idle'; // idle | recording | processing
 
     // 加载设置
     this.settings = this.loadSettings();
@@ -452,7 +381,6 @@ class VoicePage {
       apiUrl: this.settings.asrUrl,
       model: this.settings.asrModel
     });
-    this.ttsPlayer = new TTSPlayer();
     this.assistantClient = new AssistantClient({
       apiUrl: this.settings.apiUrl
     });
@@ -497,7 +425,6 @@ class VoicePage {
 
     // 清空对话
     this.clearBtn.addEventListener('click', () => {
-      this.ttsPlayer.stop();
       this.chatUI.clear();
       this.setState('idle');
     });
@@ -533,18 +460,6 @@ class VoicePage {
         this.settingsDialog.close();
       }
     });
-
-    // 重新朗读按钮（事件委托）
-    this.messagesContainer.addEventListener('click', (event) => {
-      const replayBtn = event.target.closest('[data-replay]');
-      if (replayBtn) {
-        const index = parseInt(replayBtn.dataset.replay, 10);
-        const message = this.chatUI.messages[index];
-        if (message && message.role === 'assistant') {
-          this.speakText(message.text);
-        }
-      }
-    });
   }
 
   async handleButtonClick() {
@@ -556,8 +471,7 @@ class VoicePage {
         await this.stopRecording();
         break;
       case 'processing':
-      case 'speaking':
-        // 这两个状态下按钮禁用，不做处理
+        // 处理中状态按钮禁用，不做处理
         break;
     }
   }
@@ -569,9 +483,6 @@ class VoicePage {
         this.showError('浏览器不支持录音功能');
         return;
       }
-
-      // 停止之前的朗读
-      this.ttsPlayer.stop();
 
       this.setState('recording');
       await this.recorder.start();
@@ -613,31 +524,13 @@ class VoicePage {
       // 显示助手回复
       this.chatUI.append({ role: 'assistant', text: answer });
 
-      // 朗读回复
-      await this.speakText(answer);
+      this.setState('idle');
 
     } catch (error) {
       console.error('Processing error:', error);
       this.showError(error.message || '处理失败');
       this.setState('idle');
     }
-  }
-
-  async speakText(text) {
-    if (!TTSPlayer.isSupported()) {
-      console.warn('TTS not supported, skipping speech');
-      this.setState('idle');
-      return;
-    }
-
-    try {
-      this.setState('speaking');
-      await this.ttsPlayer.speak(text);
-    } catch (error) {
-      console.error('TTS error:', error);
-      // TTS 失败不影响主流程，仅记录
-    }
-    this.setState('idle');
   }
 
   setState(newState) {
@@ -667,13 +560,6 @@ class VoicePage {
         btnClass: '',
         status: '正在识别...',
         disabled: true
-      },
-      speaking: {
-        btnIcon: '🔊',
-        btnText: '朗读中',
-        btnClass: 'speaking',
-        status: '正在播放回复',
-        disabled: true
       }
     };
 
@@ -698,4 +584,4 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // 导出
-export { VoiceRecorder, ASRClient, TTSPlayer, AssistantClient, ChatUI };
+export { VoiceRecorder, ASRClient, AssistantClient, ChatUI };
