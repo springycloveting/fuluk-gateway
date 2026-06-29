@@ -173,13 +173,6 @@ class ASRClient {
     this.apiUrl = options.apiUrl || 'http://127.0.0.1:8003/v1/audio/transcriptions';
     this.model = options.model || 'Qwen3-ASR-1.7b-Q4_K_M.gguf';
     this.timeout = options.timeout || 30000;
-    // ASR 提示词，帮助识别专业术语
-    this.prompt = options.prompt || [
-      "Session Gateway, AI 编程助手, codex, claude, opencode, pi-os,",
-      "会话管理, 创建会话, 停止会话, 重启会话,",
-      "工作流, 房间, 角色, 规划者, 开发者, 测试者,",
-      "Docker, 主机模式, 终端, 命令行"
-    ].join(" ");
   }
 
   // 发送音频进行识别
@@ -196,10 +189,6 @@ class ASRClient {
     const formData = new FormData();
     formData.append('file', wavBlob, 'recording.wav');
     formData.append('model', this.model);
-    // 添加提示词帮助识别专业术语
-    if (this.prompt) {
-      formData.append('prompt', this.prompt);
-    }
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.timeout);
@@ -476,14 +465,12 @@ class VoicePage {
     this.settingsToken = document.getElementById('settings-token');
     this.settingsAsrUrl = document.getElementById('settings-asr-url');
     this.settingsAsrModel = document.getElementById('settings-asr-model');
-    this.settingsAsrPrompt = document.getElementById('settings-asr-prompt');
 
     // 组件
     this.recorder = new VoiceRecorder();
     this.asrClient = new ASRClient({
       apiUrl: this.settings.asrUrl,
-      model: this.settings.asrModel,
-      prompt: this.settings.asrPrompt
+      model: this.settings.asrModel
     });
     this.ttsPlayer = new TTSPlayer();
     this.assistantClient = new AssistantClient({
@@ -510,8 +497,7 @@ class VoicePage {
     return {
       token: localStorage.getItem('sessionGatewayToken') || '',
       asrUrl: 'http://127.0.0.1:8003/v1/audio/transcriptions',
-      asrModel: 'Qwen3-ASR-1.7b-Q4_K_M.gguf',
-      asrPrompt: 'codex, claude, opencode, pi-os, Session Gateway, 会话, 工作流, 房间, Docker, 主机模式'
+      asrModel: 'Qwen3-ASR-1.7b-Q4_K_M.gguf'
     };
   }
 
@@ -527,7 +513,6 @@ class VoicePage {
     this.settingsToken.value = this.settings.token;
     this.settingsAsrUrl.value = this.settings.asrUrl;
     this.settingsAsrModel.value = this.settings.asrModel;
-    this.settingsAsrPrompt.value = this.settings.asrPrompt || '';
   }
 
   bindEvents() {
@@ -552,14 +537,12 @@ class VoicePage {
       this.settings.token = this.settingsToken.value.trim();
       this.settings.asrUrl = this.settingsAsrUrl.value.trim() || 'http://127.0.0.1:8003/v1/audio/transcriptions';
       this.settings.asrModel = this.settingsAsrModel.value.trim() || 'Qwen3-ASR-1.7b-Q4_K_M.gguf';
-      this.settings.asrPrompt = this.settingsAsrPrompt.value.trim();
       this.saveSettings();
 
       // 更新 ASR 客户端配置
       this.asrClient = new ASRClient({
         apiUrl: this.settings.asrUrl,
-        model: this.settings.asrModel,
-        prompt: this.settings.asrPrompt
+        model: this.settings.asrModel
       });
 
       this.settingsDialog.close();
