@@ -18,3 +18,12 @@ fuluk-pi-workflow-setup-handoff.md
 # Internal development docs
 docs/pm-room-harness-*.md
 docs/tui-web-rendering-plans.md
+
+# Local scratch / convenience files (not project code)
+/back
+/gatewaystart
+/FAILURE_LOG.md
+
+# Binary audio artifacts (local recordings, not committed)
+*.wav
+*.m4a
