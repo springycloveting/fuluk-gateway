@@ -399,8 +399,13 @@ els.confirmAlert.addEventListener("click", async () => {
 });
 els.closeSessions.addEventListener("click", closeSessionsPanel);
 els.openConfig.addEventListener("click", async () => {
-  await loadConfig();
-  els.configDialog.showModal();
+  try {
+    await loadConfig();
+  } catch (error) {
+    showError(error);
+  } finally {
+    els.configDialog.showModal();
+  }
 });
 els.openHistory.addEventListener("click", async () => {
   await loadHistory();
@@ -575,13 +580,14 @@ document.querySelectorAll(".review-quick-btn").forEach((btn) => {
 });
 els.input.addEventListener("keydown", (event) => {
   if (event.key === "Enter") sendInput();
+  // Only intercept PageUp/PageDown for opencode sessions
   if (!selectedRoomForChat() && (event.key === "PageUp" || event.key === "PageDown")) {
-    event.preventDefault();
-    if (shouldUsePaneWheel(currentSelectedSession())) {
+    const selected = currentSelectedSession();
+    if (shouldUsePaneWheel(selected)) {
+      event.preventDefault();
       sendQuickKeys([event.key === "PageUp" ? "WheelUpPane" : "WheelDownPane"]);
-    } else {
-      scrollOutputHistory(event.key === "PageUp" ? -1 : 1);
     }
+    // For other sessions, let the browser/xterm handle PageUp/PageDown
   }
 });
 els.terminalOutput.addEventListener("wheel", handleOutputWheel, { passive: false, capture: true });
@@ -1292,7 +1298,9 @@ async function loadOutput(options = {}) {
   state.outputLoading = true;
   state.outputLoadingSessionId = sessionId;
   try {
-    const params = new URLSearchParams({ lines: "300", format: "json" });
+    const size = measureTerminalSize() ?? { cols: 80, rows: 24 };
+    const params = new URLSearchParams({ format: "json" });
+    params.set("lines", String(clampInteger(size.rows + 2, 20, 300)));
     if (state.outputScrollOffset > 0) params.set("offset", String(state.outputScrollOffset));
     if (selected.kind !== "runtime" && ensureTerminal()) params.set("raw", "1");
     const etag = state.outputEtags.get(sessionId);
@@ -1374,7 +1382,7 @@ function updateOutputText(text, options = {}) {
       els.output.hidden = false;
     }
     els.output.textContent = renderedWithXterm ? "" : outputText;
-    els.title.textContent = state.selected.name;
+    els.title.textContent = state.selected?.name ?? "";
     if (shouldStickToBottom) {
       els.terminalOutput.scrollTop = els.terminalOutput.scrollHeight;
     }
@@ -1400,7 +1408,7 @@ function ensureTerminal() {
     fontFamily: "\"SFMono-Regular\", Consolas, \"Liberation Mono\", monospace",
     fontSize: 13,
     lineHeight: 1.45,
-    scrollback: 0,
+    scrollback: 5000,
     theme: terminalTheme()
   });
   state.terminal.open(els.xtermOutput);
@@ -1416,11 +1424,19 @@ function renderTerminalText(text) {
   const size = measureTerminalSize();
   if (size) state.terminal.resize(size.cols, size.rows);
   const version = (state.terminalRenderVersion += 1);
-  const snapshot = text || "";
+  const snapshot = visibleTerminalSnapshot(text, size?.rows);
   state.terminal.write("\x1b[3J\x1b[2J\x1b[H" + snapshot, () => {
-    if (version === state.terminalRenderVersion) state.terminal.scrollToTop();
+    if (version === state.terminalRenderVersion) state.terminal.scrollToBottom();
   });
   return true;
+}
+
+function visibleTerminalSnapshot(text, rows) {
+  const value = text ?? "";
+  if (!Number.isFinite(rows) || rows <= 0) return value;
+  const lines = value.split("\n");
+  if (lines.length <= rows) return value;
+  return lines.slice(lines.length - rows).join("\n");
 }
 
 function disposeTerminal() {
@@ -1450,18 +1466,17 @@ function terminalTheme() {
 }
 
 function handleOutputWheel(event) {
+  const selected = currentSelectedSession();
+  // Only intercept wheel for opencode sessions (send to tmux)
+  // For other sessions, let the frontend (xterm/browser) handle scrolling
+  if (!shouldUsePaneWheel(selected)) return;
   if (!shouldForwardOutputWheel(event)) return;
   event.preventDefault();
   const now = Date.now();
   if (now - state.outputWheelLastSentAt < 180) return;
   state.outputWheelLastSentAt = now;
-  const selected = currentSelectedSession();
-  if (shouldUsePaneWheel(selected)) {
-    const wheelKey = event.deltaY < 0 ? "WheelUpPane" : "WheelDownPane";
-    sendQuickKeys(Array.from({ length: 5 }, () => wheelKey), { skipRefresh: true });
-    return;
-  }
-  scrollOutputHistory(event.deltaY < 0 ? -1 : 1);
+  const wheelKey = event.deltaY < 0 ? "WheelUpPane" : "WheelDownPane";
+  sendQuickKeys(Array.from({ length: 5 }, () => wheelKey), { skipRefresh: true });
 }
 
 function shouldUsePaneWheel(session) {
@@ -1470,23 +1485,19 @@ function shouldUsePaneWheel(session) {
 
 function shouldForwardOutputWheel(event) {
   const selected = currentSelectedSession();
-  if (!selected || selected.status !== "running" || selected.kind === "runtime") return false;
+  if (!selected || selected.status !== "running") return false;
   if (!event.deltaY) return false;
-  if (state.terminalUsingXterm) return true;
-  const scroller = els.terminalOutput;
-  const canScrollUp = scroller.scrollTop > 0;
-  const canScrollDown = scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 1;
-  return event.deltaY < 0 ? !canScrollUp : !canScrollDown;
+  return true;
 }
 
-function scrollOutputHistory(direction) {
+function scrollOutputHistory(step) {
   const selected = currentSelectedSession();
   if (!selected || selected.status !== "running") return false;
-  const terminalSize = measureTerminalSize();
-  const step = Math.max(5, Math.floor((terminalSize?.rows ?? 30) * 0.8));
+  const direction = step < 0 ? -1 : 1;
+  const absStep = Math.abs(step);
   const nextOffset = direction < 0
-    ? Math.min(state.outputScrollOffset + step, 5000)
-    : Math.max(state.outputScrollOffset - step, 0);
+    ? Math.min(state.outputScrollOffset + absStep, 5000)
+    : Math.max(state.outputScrollOffset - absStep, 0);
   if (nextOffset === state.outputScrollOffset) return false;
   state.outputScrollOffset = nextOffset;
   clearOutputEtag(selected.id);
@@ -1973,10 +1984,18 @@ function activateQuickKey(quickKey) {
     return;
   }
   if (quickKey.type === "history-page") {
-    if (shouldUsePaneWheel(currentSelectedSession())) {
+    const selected = currentSelectedSession();
+    if (shouldUsePaneWheel(selected)) {
       sendQuickKeys([quickKey.value === "up" ? "WheelUpPane" : "WheelDownPane"]);
+    } else if (state.terminalUsingXterm && state.terminal) {
+      // Use xterm's scroll API for pages
+      const pages = Math.floor((state.terminal.rows ?? 24) * 0.8);
+      state.terminal.scrollLines(quickKey.value === "up" ? -pages : pages);
     } else {
-      scrollOutputHistory(quickKey.value === "up" ? -1 : 1);
+      // For non-xterm mode, scroll the output element
+      const terminalSize = measureTerminalSize();
+      const step = Math.max(5, Math.floor((terminalSize?.rows ?? 30) * 0.8));
+      scrollOutputHistory(quickKey.value === "up" ? -step : step);
     }
     return;
   }

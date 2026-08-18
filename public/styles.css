@@ -274,7 +274,7 @@ h2 {
 
 .xterm-output {
   height: 100%;
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 .xterm-output .xterm {
@@ -287,11 +287,11 @@ h2 {
 }
 
 .xterm-output .xterm-viewport {
-  overflow: hidden !important;
+  /* Allow xterm's viewport to scroll */
 }
 
 .xterm-output .xterm-scroll-area {
-  height: 0 !important;
+  /* Let xterm manage scroll area height */
 }
 
 .xterm-output .xterm-accessibility,
