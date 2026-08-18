@@ -39,7 +39,8 @@ export class TmuxBackend {
       : null;
     const deployment = input.deployment ?? configuredDeployment;
     if (deployment?.mode === "host") {
-      return { command: input.kind === "claude" ? "claude" : input.kind, args: [], cwdMode: "host" };
+      const command = input.kind === "claude" ? "claude" : input.kind;
+      return withCliEnvironment(input.kind, { command, args: [], cwdMode: "host" });
     }
 
     const dockerName = deployment?.dockerName ?? configuredDeployment?.dockerName;
@@ -48,7 +49,11 @@ export class TmuxBackend {
       : this.config.cliCommands[input.kind];
     return {
       command: configured[0],
-      args: withDockerWorkdir(configured.slice(1), input.cwd),
+      args: withCliEnvironment(input.kind, {
+        command: configured[0],
+        args: withDockerWorkdir(configured.slice(1), input.cwd),
+        cwdMode: "container"
+      }).args,
       cwdMode: "container"
     };
   }
@@ -216,6 +221,21 @@ async function ensureDockerDirectoryExists(command, args, cwd) {
 function withDockerWorkdir(args, cwd) {
   if (args[0] !== "exec") return args;
   return ["exec", "-w", cwd, ...args.slice(1)];
+}
+
+function withCliEnvironment(kind, commandSpec) {
+  if (kind !== "opencode") return commandSpec;
+  if (commandSpec.command === "docker" && commandSpec.args[0] === "exec") {
+    return {
+      ...commandSpec,
+      args: ["exec", "-e", "TERM=screen-256color", ...commandSpec.args.slice(1)]
+    };
+  }
+  return {
+    ...commandSpec,
+    command: "env",
+    args: ["TERM=screen-256color", commandSpec.command, ...commandSpec.args]
+  };
 }
 
 function findDockerExecContainer(args) {

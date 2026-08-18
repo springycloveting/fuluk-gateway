@@ -35,7 +35,7 @@ test("TmuxBackend maps AI CLIs to docker exec commands", () => {
   });
   assert.deepEqual(tmux.resolveCreateCommand({ kind: "opencode", cwd: "/workspace/test" }), {
     command: "docker",
-    args: ["exec", "-w", "/workspace/test", "-it", "worker-opencode", "opencode"],
+    args: ["exec", "-e", "TERM=screen-256color", "-w", "/workspace/test", "-it", "worker-opencode", "opencode"],
     cwdMode: "container"
   });
   assert.deepEqual(tmux.resolveCreateCommand({ kind: "runtime", cwd: "/tmp" }), {
@@ -74,8 +74,8 @@ test("TmuxBackend maps AI CLIs to host commands", () => {
     cwdMode: "host"
   });
   assert.deepEqual(tmux.resolveCreateCommand({ kind: "opencode", cwd: "/workspace/test" }), {
-    command: "opencode",
-    args: [],
+    command: "env",
+    args: ["TERM=screen-256color", "opencode"],
     cwdMode: "host"
   });
 });
