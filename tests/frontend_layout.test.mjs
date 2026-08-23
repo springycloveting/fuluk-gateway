@@ -17,6 +17,42 @@ test("live xterm output renders the visible tail instead of the 300-line top", (
   assert.equal(app.includes("state.terminal.scrollToTop();"), false);
 });
 
+test("wheel scrolling routes non-opencode sessions through tmux scrollback, not a dead early-return", () => {
+  // Regression: commit 7f3985a rewrote handleOutputWheel to early-return for
+  // non-opencode sessions ("let xterm/browser handle scrolling"). But xterm
+  // holds no scrollback — renderTerminalText clears it (\x1b[3J) every refresh
+  // and only writes the visible tail — so the wheel did nothing for claude/codex.
+  // The wheel must call scrollOutputHistory (server-side offset scrollback).
+  const app = fs.readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+
+  assert.equal(
+    app.includes("if (!shouldUsePaneWheel(selected)) return;"),
+    false,
+    "handleOutputWheel must not early-return for non-opencode sessions — that breaks wheel scrolling"
+  );
+  assert.ok(
+    app.includes("scrollOutputHistory(event.deltaY < 0 ? -1 : 1);"),
+    "handleOutputWheel must scroll non-opencode sessions via scrollOutputHistory"
+  );
+});
+
+test("page up/down scroll tmux history, not xterm scrollLines which has no scrollback", () => {
+  // Same root cause as wheel: xterm's buffer is always one screenful (scrollback
+  // cleared each refresh, only the visible tail fetched), so terminal.scrollLines
+  // scrolls nothing. Page keys must use scrollOutputHistory.
+  const app = fs.readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+
+  assert.equal(
+    app.includes("state.terminal.scrollLines("),
+    false,
+    "page up/down must not rely on xterm scrollLines — xterm holds no scrollback"
+  );
+  assert.ok(
+    app.includes("scrollOutputHistory(quickKey.value === \"up\" ? -step : step);"),
+    "page up/down must scroll via scrollOutputHistory"
+  );
+});
+
 test("updateOutputText tolerates a browser with no session selected", () => {
   // On a token-less browser the init flow hits GET /api/config -> 401, which
   // loadConfig reports via showError -> updateOutputText. If updateOutputText

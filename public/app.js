@@ -1466,17 +1466,22 @@ function terminalTheme() {
 }
 
 function handleOutputWheel(event) {
-  const selected = currentSelectedSession();
-  // Only intercept wheel for opencode sessions (send to tmux)
-  // For other sessions, let the frontend (xterm/browser) handle scrolling
-  if (!shouldUsePaneWheel(selected)) return;
   if (!shouldForwardOutputWheel(event)) return;
   event.preventDefault();
   const now = Date.now();
   if (now - state.outputWheelLastSentAt < 180) return;
   state.outputWheelLastSentAt = now;
-  const wheelKey = event.deltaY < 0 ? "WheelUpPane" : "WheelDownPane";
-  sendQuickKeys(Array.from({ length: 5 }, () => wheelKey), { skipRefresh: true });
+  const selected = currentSelectedSession();
+  if (shouldUsePaneWheel(selected)) {
+    // opencode: forward wheel to tmux copy-mode pane scrolling
+    const wheelKey = event.deltaY < 0 ? "WheelUpPane" : "WheelDownPane";
+    sendQuickKeys(Array.from({ length: 5 }, () => wheelKey), { skipRefresh: true });
+    return;
+  }
+  // claude/codex/etc.: xterm holds no scrollback (renderTerminalText clears it
+  // every refresh and only writes the visible tail), so native wheel scrolling
+  // does nothing. Scroll through tmux history via the server-side offset instead.
+  scrollOutputHistory(event.deltaY < 0 ? -1 : 1);
 }
 
 function shouldUsePaneWheel(session) {
@@ -1987,12 +1992,8 @@ function activateQuickKey(quickKey) {
     const selected = currentSelectedSession();
     if (shouldUsePaneWheel(selected)) {
       sendQuickKeys([quickKey.value === "up" ? "WheelUpPane" : "WheelDownPane"]);
-    } else if (state.terminalUsingXterm && state.terminal) {
-      // Use xterm's scroll API for pages
-      const pages = Math.floor((state.terminal.rows ?? 24) * 0.8);
-      state.terminal.scrollLines(quickKey.value === "up" ? -pages : pages);
     } else {
-      // For non-xterm mode, scroll the output element
+      // Scroll tmux history via the server-side offset (xterm holds no scrollback)
       const terminalSize = measureTerminalSize();
       const step = Math.max(5, Math.floor((terminalSize?.rows ?? 30) * 0.8));
       scrollOutputHistory(quickKey.value === "up" ? -step : step);
