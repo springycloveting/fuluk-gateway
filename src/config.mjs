@@ -84,7 +84,7 @@ export function loadConfig() {
 }
 
 export function updateRuntimeSettings(config, input) {
-  const next = normalizeRuntimeSettings(input);
+  const next = normalizeRuntimeSettings(input, config.runtimeSettings);
   fs.mkdirSync(path.dirname(config.settingsPath), { recursive: true });
   fs.writeFileSync(config.settingsPath, `${JSON.stringify(next, null, 2)}\n`);
   config.runtimeSettingsEnabled = true;
@@ -93,9 +93,10 @@ export function updateRuntimeSettings(config, input) {
   return next;
 }
 
-export function normalizeRuntimeSettings(input = {}) {
+export function normalizeRuntimeSettings(input = {}, existing = {}) {
   const cliDeployment = {};
   const source = input.cliDeployment && typeof input.cliDeployment === "object" ? input.cliDeployment : {};
+  const prevSettings = existing && typeof existing === "object" ? existing : {};
 
   for (const kind of CLI_KINDS) {
     const current = source[kind] && typeof source[kind] === "object" ? source[kind] : {};
@@ -110,7 +111,7 @@ export function normalizeRuntimeSettings(input = {}) {
 
   return {
     cliDeployment,
-    commandParser: normalizeCommandParser(input.commandParser),
+    commandParser: normalizeCommandParser(input.commandParser, prevSettings.commandParser),
     notifications: normalizeNotifications(input.notifications),
     sessionAgent: normalizeSessionAgent(input.sessionAgent),
     workflowSupervisor: normalizeWorkflowSupervisor(input.workflowSupervisor)
@@ -215,8 +216,9 @@ function normalizeNotifications(input = {}) {
   };
 }
 
-function normalizeCommandParser(input = {}) {
+function normalizeCommandParser(input = {}, existing = {}) {
   const current = input && typeof input === "object" ? input : {};
+  const prev = existing && typeof existing === "object" ? existing : {};
   const mode =
     current.mode === "rules-first-ai-fallback" ||
     current.mode === "rules-only" ||
@@ -229,12 +231,31 @@ function normalizeCommandParser(input = {}) {
   return {
     enabled,
     mode: enabled ? mode : "rules-only",
-    baseUrl: typeof current.baseUrl === "string" ? current.baseUrl.trim().replace(/\/+$/, "") : "",
-    model: typeof current.model === "string" ? current.model.trim() : "",
-    apiKey: typeof current.apiKey === "string" ? current.apiKey.trim() : "",
-    webAiAgentPiUrl: typeof current.webAiAgentPiUrl === "string" ? current.webAiAgentPiUrl.trim().replace(/\/+$/, "") : "",
-    webAiAgentPiToken: typeof current.webAiAgentPiToken === "string" ? current.webAiAgentPiToken.trim() : ""
+    baseUrl: resolveConfigField(current.baseUrl, prev.baseUrl, { stripTrailingSlash: true }),
+    model: resolveConfigField(current.model, prev.model),
+    apiKey: resolveConfigField(current.apiKey, prev.apiKey),
+    webAiAgentPiUrl: resolveConfigField(current.webAiAgentPiUrl, prev.webAiAgentPiUrl, { stripTrailingSlash: true }),
+    webAiAgentPiToken: resolveConfigField(current.webAiAgentPiToken, prev.webAiAgentPiToken)
   };
+}
+
+// Resolve a config field whose value may be supplied partially. The web UI's
+// save flow sends the form's current field values verbatim, so a blank field
+// (e.g. when a user only edits the bearer token) must not clobber an already
+// configured LLM endpoint. A non-empty incoming value always overrides, so a
+// user can still switch providers; only blank/absent inputs fall back to the
+// previously persisted value.
+function resolveConfigField(incoming, prev, options = {}) {
+  const value = pickNonBlank(incoming, prev);
+  if (!value) return "";
+  if (options.stripTrailingSlash) return value.replace(/\/+$/, "");
+  return value;
+}
+
+function pickNonBlank(incoming, prev) {
+  if (typeof incoming === "string" && incoming.trim()) return incoming.trim();
+  if (typeof prev === "string" && prev.trim()) return prev.trim();
+  return "";
 }
 
 function splitCommand(value) {
